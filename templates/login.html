@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Portal Login</title>
+    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <script src="/static/js/jquery-3.7.1.min.js"></script>
+    <script>
+        window.jQuery = jQuery;
+    </script>
+    <script src="/static/js/bootstrap.bundle.min.js"></script>
+    <style>
+        /* Overlay style for the message bar */
+        #message-bar {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            right: 10px;
+            z-index: 9999;
+            width: calc(100% - 20px);
+        }
+        /* Loading indicator style */
+        #loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 10000;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body class="d-flex justify-content-center align-items-center vh-100">
+    <div class="container text-center">
+        <!-- Login Form -->
+        <div id="login-form" class="d-block">
+            <div class="row justify-content-center">
+                <div class="col-md-4">
+                    <div class="card p-4 shadow-lg">
+                        <h3 class="mb-4">Login</h3>
+                        <form id="login-form-submit">
+                            <!-- Hidden CSRF token field for login -->
+                            <input type="hidden" name="csrf_token" id="csrf_token" value="{{.CSRFToken}}">
+                            <div class="mb-3">
+                                <label for="username" class="form-label">Username</label>
+                                <input type="text" class="form-control" id="username" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="password" class="form-label">Password</label>
+                                <input type="password" class="form-control" id="password" required>
+                            </div>
+                            <button type="submit" class="btn btn-primary w-100">Login</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 2FA Form -->
+        <div id="2fa-form" class="d-none">
+            <div class="row justify-content-center">
+                <div class="col-md-4">
+                    <div class="card p-4 shadow-lg">
+                        <h3 class="mb-4">Verify 2FA Code</h3>
+                        <form id="2fa-form-submit">
+                            <!-- Hidden CSRF token field for 2FA -->
+                            <input type="hidden" name="csrf_token_2fa" id="csrf_token_2fa">
+                            <div class="mb-3">
+                                <label for="otp" class="form-label">Enter 2FA Code</label>
+                                <input type="password" class="form-control" id="otp" required>
+                            </div>
+                            <button type="submit" class="btn btn-success w-100 mt-2">Verify</button>
+                            <button type="button" class="btn btn-secondary w-100 mt-2" id="cancel">Cancel</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Loading Indicator -->
+        <div id="loading" class="d-none">Loading...</div>
+    </div>
+
+    <script>
+        $(document).ready(function () {
+            let tempToken = null;
+
+            // Show a temporary message bar
+            function showMessageBar(message, type = "danger") {
+                var messageBar = $('<div>', {
+                    id: 'message-bar',
+                    class: `alert alert-${type} alert-dismissible fade show`,
+                    role: 'alert'
+                }).text(message);
+
+                var closeButton = $('<button>', {
+                    type: 'button',
+                    class: 'btn-close',
+                    'data-bs-dismiss': 'alert',
+                    'aria-label': 'Close'
+                });
+
+                messageBar.append(closeButton);
+                $('body').append(messageBar);
+
+                // Make sure the alert disappears after 5 seconds or when closed manually
+                setTimeout(function() {
+                    messageBar.alert('close');
+                }, 5000);
+            }
+
+            // Clear invalid state on input
+            $("#username, #password, #otp").on("input", function () {
+                $(".alert").alert('close');
+                $(this).removeClass("is-invalid");
+            });
+
+            // Handle login form submission
+            $("#login-form-submit").submit(function (e) {
+                e.preventDefault();
+                $("#loading").removeClass("d-none");
+                let username = $("#username").val();
+                let password = $("#password").val();
+                let csrfToken = $("#csrf_token").val();
+
+                $.post("/login", { username, password, csrf_token: csrfToken })
+                    .done(function (data) {
+                        if (data.requires2FA) {
+                            tempToken = data.tempToken;
+                            $("#csrf_token_2fa").val(data.csrfToken2FA); // Set CSRF token for 2FA
+                            $("#login-form").addClass("d-none");
+                            $("#2fa-form").removeClass("d-none");
+                            $("#otp").focus();
+                        } else if (data.redirect) {
+                            window.location.href = data.redirect;
+                        } else if (data.error) {
+                            $("#username").val('').addClass("is-invalid");
+                            $("#password").val('').addClass("is-invalid");
+                            $("#username").focus();
+                            showMessageBar(data.error);
+                        }
+                    })
+                    .fail(function (jqXHR) {
+                        let errorMessage = jqXHR.responseJSON && jqXHR.responseJSON.error
+                            ? jqXHR.responseJSON.error
+                            : "An error occurred. Please try again.";
+                        $("#username").val('').addClass("is-invalid");
+                        $("#password").val('').addClass("is-invalid");
+                        $("#username").focus();
+                        showMessageBar(errorMessage);
+                    })
+                    .always(function() {
+                        $("#loading").addClass("d-none");
+                    });
+            });
+
+            // Handle 2FA form submission
+            $("#2fa-form-submit").submit(function (e) {
+                e.preventDefault();
+                $("#loading").removeClass("d-none");
+                let otp = $("#otp").val();
+                let username = $("#username").val();
+                let csrfToken2FA = $("#csrf_token_2fa").val();
+
+                if (!tempToken) {
+                    showMessageBar("Session error. Please log in again.");
+                    $("#loading").addClass("d-none");
+                    return;
+                }
+
+                $.post("/verify-2fa", { tempToken, username, otp, csrf_token_2fa: csrfToken2FA })
+                    .done(function (data) {
+                        if (data.redirect) {
+                            window.location.href = data.redirect;
+                        } else if (data.error) {
+                            $("#otp").val('').addClass("is-invalid");
+                            showMessageBar(data.error);
+                        }
+                    })
+                    .fail(function (jqXHR) {
+                        let errorMessage = jqXHR.responseJSON && jqXHR.responseJSON.error
+                            ? jqXHR.responseJSON.error
+                            : "An error occurred. Please try again.";
+                        $("#otp").val('').addClass("is-invalid");
+                        showMessageBar(errorMessage);
+                    })
+                    .always(function() {
+                        $("#loading").addClass("d-none");
+                    });
+            });
+
+            // Handle cancel button click
+            $("#cancel").click(function () {
+                $("#login-form-submit")[0].reset();
+                $("#2fa-form-submit")[0].reset();
+                $("#login-form").removeClass("d-none");
+                $("#2fa-form").addClass("d-none");
+                $("#username").focus();
+            });
+        });
+    </script>
+</body>
+</html>

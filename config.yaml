@@ -1,0 +1,22 @@
+server:
+  listen_address: "0.0.0.0"
+  port: "8443"
+  enable_tls: true
+  tls_cert_file: "certs/server-cert.pem"
+  tls_key_file: "certs/server-key.pem"
+  tls_ca_file: "certs/ca-cert.pem"
+  tls_min_version: "TLSv1.3"  # Can be TLSv1.1, TLSv1.2, or TLSv1.3
+etcd:
+  endpoints:
+    - "localhost:2379"
+  enable_tls: true
+  tls_cert_file: "certs/client-cert.pem"
+  tls_key_file: "certs/client-key.pem"
+encryption:
+  key: "4a8f3b2c9d1e5f7a0b4c6d8e2f1a3b5c7d9e0f2a4b6c8d1e3f5a7b9c0d2e4f6a"
+two_factor:
+  enabled: true
+  secret: "JBSWY3DPEHPK3PXP"
+logging:
+  debug_mode: true
+  access_file: "logs/access.log"

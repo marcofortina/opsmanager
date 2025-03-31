@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configuration</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        nav { margin-bottom: 20px; }
+        nav a { margin-right: 10px; color: #007bff; text-decoration: none; }
+        nav a:hover { text-decoration: underline; }
+        .config-form { max-width: 400px; }
+        input { display: block; margin: 10px 0; padding: 5px; width: 100%; }
+        button { padding: 10px; background-color: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        button:hover { background-color: #0056b3; }
+    </style>
+</head>
+<body>
+    <nav>
+        <a href="/dashboard">Dashboard</a>
+        <a href="/config">Config</a>
+        <a href="/logout">Logout</a>
+    </nav>
+    <h2>Configuration</h2>
+    <div class="config-form">
+        <form method="POST" action="/config">
+            <input type="text" name="setting1" placeholder="Setting 1" value="example"><br>
+            <input type="text" name="setting2" placeholder="Setting 2" value="value"><br>
+            <button type="submit">Save</button>
+        </form>
+    </div>
+</body>
+</html>
