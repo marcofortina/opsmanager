@@ -1,55 +1,85 @@
 package main
 
 import (
-	"log"
-	"os"
+	"context"
+	"flag"
+	"net/http"
+	"os/signal"
+	"syscall"
+	"time"
+
 	"opsmanager/pkg/config"
+	"opsmanager/pkg/logger"
 	"opsmanager/pkg/server"
 )
 
-// Logger instance for the application
-var logger *log.Logger
-
-// Log level prefixes
-const (
-	infoPrefix  = "INFO: "  // Prefix for info-level logs
-	debugPrefix = "DEBUG: " // Prefix for debug-level logs
-)
-
-// Log formatting flags
-const (
-	infoFlags  = log.Ldate | log.Ltime                  // Flags for info logs: date and time
-	debugFlags = log.Ldate | log.Ltime | log.Lshortfile // Flags for debug logs: date, time, and file
-)
-
-// main is the entry point of the application
+// main initializes and starts the Ops Manager application
 func main() {
-	// Load configuration from config.yaml
-	cfg, err := config.Load("config.yaml")
-	if err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
-	}
+	configPath := flag.String("config", "config.yaml", "Path to configuration file")
+	shutdownTimeout := flag.Duration("shutdown-timeout", 5*time.Second, "Timeout for graceful shutdown")
+	flag.Parse()
 
-	// Initialize logger based on debug mode
-	initializeLogger(cfg.Logging.DebugMode)
-
-	// Log server startup
-	logger.Printf("Starting web server with debug mode: %v", cfg.Logging.DebugMode)
-
-	// Initialize and start the server
-	srv := server.New(cfg, logger)
-	if err := srv.Run(); err != nil {
-		logger.Fatalf("Failed to start server: %v", err)
+	if err := run(*configPath, *shutdownTimeout); err != nil {
+		log := logger.Default()
+		log.Fatalf("Application failed: %v", err)
 	}
 }
 
-// initializeLogger configures the logger based on debug mode
-func initializeLogger(debugMode bool) {
-	if debugMode {
-		logger = log.New(os.Stdout, debugPrefix, debugFlags)
-		logger.Println("Debug mode enabled")
-	} else {
-		logger = log.New(os.Stdout, infoPrefix, infoFlags)
-		logger.Println("Debug mode disabled")
+// run executes the main application logic
+func run(configPath string, shutdownTimeout time.Duration) error {
+	// Load configuration
+	log := logger.New(true) // Default debug mode until config is loaded
+	log.Infof("Loading configuration from %s", configPath)
+	cfg, err := config.Load(configPath, log)
+	if err != nil {
+		return err
 	}
+
+	// Debug: Stampa il valore di AccessFile
+	log.Infof("Loaded config - AccessFile: %s", cfg.Logging.AccessFile)
+
+	// Update logger with config settings
+	log = logger.New(cfg.Logging.DebugMode)
+	log.Infof("Starting server with debug mode: %v", cfg.Logging.DebugMode)
+
+	// Initialize server
+	srvCfg := server.ServerConfig{
+		Config:      cfg,
+		Logger:      log,
+		TemplateDir: "./templates",
+	}
+	srv := server.New(srvCfg)
+
+	// Start server in a goroutine
+	errChan := make(chan error, 1)
+	go func() {
+		if err := srv.Run(); err != nil && err != http.ErrServerClosed {
+			errChan <- err
+		}
+		close(errChan)
+	}()
+
+	// Handle graceful shutdown
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	select {
+	case <-ctx.Done():
+		log.Info("Received shutdown signal")
+	case err := <-errChan:
+		if err != nil {
+			log.Errorf("Server failed: %v", err)
+			return err
+		}
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Errorf("Server shutdown failed: %v", err)
+		return err
+	}
+
+	log.Info("Server stopped gracefully")
+	return nil
 }

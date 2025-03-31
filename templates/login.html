@@ -3,15 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Portal Login</title>
+    <title>Portal Login - Ops Manager</title>
     <link href="/static/css/bootstrap.min.css" rel="stylesheet">
-    <script src="/static/js/jquery-3.7.1.min.js"></script>
-    <script>
-        window.jQuery = jQuery;
-    </script>
-    <script src="/static/js/bootstrap.bundle.min.js"></script>
     <style>
-        /* Overlay style for the message bar */
+        /* Overlay for message bar */
         #message-bar {
             position: fixed;
             top: 10px;
@@ -20,7 +15,7 @@
             z-index: 9999;
             width: calc(100% - 20px);
         }
-        /* Loading indicator style */
+        /* Loading indicator */
         #loading {
             position: fixed;
             top: 50%;
@@ -42,16 +37,15 @@
                 <div class="col-md-4">
                     <div class="card p-4 shadow-lg">
                         <h3 class="mb-4">Login</h3>
-                        <form id="login-form-submit">
-                            <!-- Hidden CSRF token field for login -->
+                        <form id="auth-login-form">
                             <input type="hidden" name="csrf_token" id="csrf_token" value="{{.CSRFToken}}">
                             <div class="mb-3">
                                 <label for="username" class="form-label">Username</label>
-                                <input type="text" class="form-control" id="username" required>
+                                <input type="text" class="form-control" id="username" name="username" autocomplete="username" required>
                             </div>
                             <div class="mb-3">
                                 <label for="password" class="form-label">Password</label>
-                                <input type="password" class="form-control" id="password" required>
+                                <input type="password" class="form-control" id="password" name="password" autocomplete="current-password" required>
                             </div>
                             <button type="submit" class="btn btn-primary w-100">Login</button>
                         </form>
@@ -66,15 +60,14 @@
                 <div class="col-md-4">
                     <div class="card p-4 shadow-lg">
                         <h3 class="mb-4">Verify 2FA Code</h3>
-                        <form id="2fa-form-submit">
-                            <!-- Hidden CSRF token field for 2FA -->
+                        <form id="auth-2fa-form">
                             <input type="hidden" name="csrf_token_2fa" id="csrf_token_2fa">
                             <div class="mb-3">
                                 <label for="otp" class="form-label">Enter 2FA Code</label>
-                                <input type="password" class="form-control" id="otp" required>
+                                <input type="password" class="form-control" id="otp" name="otp" autocomplete="one-time-code" required>
                             </div>
                             <button type="submit" class="btn btn-success w-100 mt-2">Verify</button>
-                            <button type="button" class="btn btn-secondary w-100 mt-2" id="cancel">Cancel</button>
+                            <button type="button" class="btn btn-secondary w-100 mt-2" id="cancel-2fa">Cancel</button>
                         </form>
                     </div>
                 </div>
@@ -85,32 +78,52 @@
         <div id="loading" class="d-none">Loading...</div>
     </div>
 
+    <script src="/static/js/jquery-3.7.1.min.js"></script>
+    <script src="/static/js/bootstrap.bundle.min.js"></script>
     <script>
+        // Ensure jQuery is available globally
+        window.jQuery = window.$;
+
         $(document).ready(function () {
             let tempToken = null;
 
-            // Show a temporary message bar
+            // Show temporary message bar
             function showMessageBar(message, type = "danger") {
-                var messageBar = $('<div>', {
+                const messageBar = $('<div>', {
                     id: 'message-bar',
                     class: `alert alert-${type} alert-dismissible fade show`,
-                    role: 'alert'
-                }).text(message);
-
-                var closeButton = $('<button>', {
+                    role: 'alert',
+                    text: message
+                }).append($('<button>', {
                     type: 'button',
                     class: 'btn-close',
                     'data-bs-dismiss': 'alert',
                     'aria-label': 'Close'
-                });
-
-                messageBar.append(closeButton);
+                }));
                 $('body').append(messageBar);
+                setTimeout(() => messageBar.alert('close'), 5000);
+            }
 
-                // Make sure the alert disappears after 5 seconds or when closed manually
-                setTimeout(function() {
-                    messageBar.alert('close');
-                }, 5000);
+            // Handle AJAX errors for login (affecting both username and password)
+            function handleLoginError(jqXHR) {
+                const errorMessage = jqXHR.responseJSON?.error || "An error occurred. Please try again.";
+                const inputs = [$("#username"), $("#password")]; // Both fields
+                inputs.forEach(input => {
+                    input.val('').addClass("is-invalid");
+                });
+                $("#username").focus(); // Focus on username
+                showMessageBar(errorMessage);
+                $("#loading").addClass("d-none");
+            }
+
+            // Handle AJAX errors for 2FA (only OTP field)
+            function handle2FAError(jqXHR) {
+                const errorMessage = jqXHR.responseJSON?.error || "An error occurred. Please try again.";
+                const input = $("#otp");
+                input.val('').addClass("is-invalid");
+                input.focus();
+                showMessageBar(errorMessage);
+                $("#loading").addClass("d-none");
             }
 
             // Clear invalid state on input
@@ -120,51 +133,51 @@
             });
 
             // Handle login form submission
-            $("#login-form-submit").submit(function (e) {
+            $("#auth-login-form").on("submit", function (e) {
                 e.preventDefault();
+                if (!this.checkValidity()) return;
                 $("#loading").removeClass("d-none");
-                let username = $("#username").val();
-                let password = $("#password").val();
-                let csrfToken = $("#csrf_token").val();
 
-                $.post("/login", { username, password, csrf_token: csrfToken })
-                    .done(function (data) {
-                        if (data.requires2FA) {
-                            tempToken = data.tempToken;
-                            $("#csrf_token_2fa").val(data.csrfToken2FA); // Set CSRF token for 2FA
+                const data = {
+                    username: $("#username").val(),
+                    password: $("#password").val(),
+                    csrf_token: $("#csrf_token").val()
+                };
+
+                $.post("/login", data)
+                    .done(function (response) {
+                        if (response.requires2FA) {
+                            tempToken = response.tempToken;
+                            $("#csrf_token_2fa").val(response.csrfToken2FA);
                             $("#login-form").addClass("d-none");
                             $("#2fa-form").removeClass("d-none");
                             $("#otp").focus();
-                        } else if (data.redirect) {
-                            window.location.href = data.redirect;
-                        } else if (data.error) {
-                            $("#username").val('').addClass("is-invalid");
-                            $("#password").val('').addClass("is-invalid");
-                            $("#username").focus();
-                            showMessageBar(data.error);
+                        } else if (response.redirect) {
+                            window.location.href = response.redirect;
+                        } else if (response.error) {
+                            handleLoginError({ responseJSON: response });
                         }
                     })
                     .fail(function (jqXHR) {
-                        let errorMessage = jqXHR.responseJSON && jqXHR.responseJSON.error
-                            ? jqXHR.responseJSON.error
-                            : "An error occurred. Please try again.";
-                        $("#username").val('').addClass("is-invalid");
-                        $("#password").val('').addClass("is-invalid");
-                        $("#username").focus();
-                        showMessageBar(errorMessage);
+                        handleLoginError(jqXHR);
                     })
-                    .always(function() {
+                    .always(function () {
                         $("#loading").addClass("d-none");
                     });
             });
 
             // Handle 2FA form submission
-            $("#2fa-form-submit").submit(function (e) {
+            $("#auth-2fa-form").on("submit", function (e) {
                 e.preventDefault();
+                if (!this.checkValidity()) return;
                 $("#loading").removeClass("d-none");
-                let otp = $("#otp").val();
-                let username = $("#username").val();
-                let csrfToken2FA = $("#csrf_token_2fa").val();
+
+                const data = {
+                    tempToken: tempToken,
+                    username: $("#username").val(),
+                    otp: $("#otp").val(),
+                    csrf_token_2fa: $("#csrf_token_2fa").val()
+                };
 
                 if (!tempToken) {
                     showMessageBar("Session error. Please log in again.");
@@ -172,31 +185,26 @@
                     return;
                 }
 
-                $.post("/verify-2fa", { tempToken, username, otp, csrf_token_2fa: csrfToken2FA })
-                    .done(function (data) {
-                        if (data.redirect) {
-                            window.location.href = data.redirect;
-                        } else if (data.error) {
-                            $("#otp").val('').addClass("is-invalid");
-                            showMessageBar(data.error);
+                $.post("/verify-2fa", data)
+                    .done(function (response) {
+                        if (response.redirect) {
+                            window.location.href = response.redirect;
+                        } else if (response.error) {
+                            handle2FAError({ responseJSON: response });
                         }
                     })
                     .fail(function (jqXHR) {
-                        let errorMessage = jqXHR.responseJSON && jqXHR.responseJSON.error
-                            ? jqXHR.responseJSON.error
-                            : "An error occurred. Please try again.";
-                        $("#otp").val('').addClass("is-invalid");
-                        showMessageBar(errorMessage);
+                        handle2FAError(jqXHR);
                     })
-                    .always(function() {
+                    .always(function () {
                         $("#loading").addClass("d-none");
                     });
             });
 
-            // Handle cancel button click
-            $("#cancel").click(function () {
-                $("#login-form-submit")[0].reset();
-                $("#2fa-form-submit")[0].reset();
+            // Handle cancel button
+            $("#cancel-2fa").on("click", function () {
+                $("#auth-login-form")[0].reset();
+                $("#auth-2fa-form")[0].reset();
                 $("#login-form").removeClass("d-none");
                 $("#2fa-form").addClass("d-none");
                 $("#username").focus();

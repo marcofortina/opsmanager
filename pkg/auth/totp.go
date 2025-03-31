@@ -6,60 +6,116 @@ import (
 	"encoding/base32"
 	"fmt"
 	"math"
+	"sync"
 	"time"
+
+	"opsmanager/pkg/logger"
 )
 
-// TOTP configuration constants
+// TOTPManager manages TOTP code generation and verification
+type TOTPManager struct {
+	secret     []byte
+	interval   int
+	codeLength int
+	log        *logger.Logger
+	pool       *sync.Pool
+}
+
+// TOTPConfig holds configuration for TOTPManager
+type TOTPConfig struct {
+	Seed       string
+	Interval   int // Time step in seconds
+	CodeLength int // Length of the TOTP code
+	Logger     *logger.Logger
+}
+
+// Default TOTP constants
 const (
-	totpInterval    = 30      // Time step in seconds (standard TOTP interval)
-	totpCodeLength  = 6       // Length of the TOTP code (6 digits)
-	totpCodeModulus = 1000000 // Modulus for generating a 6-digit code (10^6)
+	DefaultTOTPInterval   = 30      // Default time step in seconds
+	DefaultTOTPCodeLength = 6       // Default length of TOTP code
+	totpCodeModulus       = 1000000 // Modulus for 6-digit code (10^6)
 )
 
-// GenerateTOTP generates a TOTP code based on a seed and time
-func GenerateTOTP(seed string, t time.Time) (string, error) {
-	// Decode base32 seed into bytes
-	secret, err := base32.StdEncoding.DecodeString(seed)
-	if err != nil {
-		return "", fmt.Errorf("failed to decode base32 seed: %v", err)
+// NewTOTPManager initializes a new TOTPManager
+func NewTOTPManager(cfg *TOTPConfig) (*TOTPManager, error) {
+	if cfg.Logger == nil {
+		cfg.Logger = logger.Default()
+	}
+	if cfg.Interval <= 0 {
+		cfg.Interval = DefaultTOTPInterval
+	}
+	if cfg.CodeLength <= 0 {
+		cfg.CodeLength = DefaultTOTPCodeLength
 	}
 
-	// Calculate counter from time (number of 30-second intervals)
-	counter := uint64(math.Floor(float64(t.Unix()) / totpInterval))
+	if cfg.Seed == "" {
+		return nil, fmt.Errorf("TOTP seed cannot be empty")
+	}
 
-	// Convert counter to 8-byte message (big-endian)
-	msg := make([]byte, 8)
+	secret, err := base32.StdEncoding.DecodeString(cfg.Seed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode TOTP seed: %v", err)
+	}
+	if len(secret) < 10 { // Minimum entropy
+		return nil, fmt.Errorf("TOTP seed too short")
+	}
+
+	return &TOTPManager{
+		secret:     secret,
+		interval:   cfg.Interval,
+		codeLength: cfg.CodeLength,
+		log:        cfg.Logger,
+		pool: &sync.Pool{
+			New: func() interface{} {
+				b := make([]byte, 8)
+				return &b // Returns *[]byte
+			},
+		},
+	}, nil
+}
+
+// GenerateTOTP generates a TOTP code for a given time
+func (m *TOTPManager) GenerateTOTP(t *time.Time) (string, error) {
+	counter := uint64(math.Floor(float64(t.Unix()) / float64(m.interval)))
+	msgPtr := m.pool.Get().(*[]byte) // Correct: expects *[]byte
+	defer m.pool.Put(msgPtr)
+	msg := *msgPtr // Dereference to get []byte
+
 	for i := 7; i >= 0; i-- {
 		msg[i] = byte(counter & 0xff)
 		counter >>= 8
 	}
 
-	// Compute HMAC-SHA1 hash with secret and message
-	h := hmac.New(sha1.New, secret)
+	h := hmac.New(sha1.New, m.secret)
 	h.Write(msg)
 	hash := h.Sum(nil)
 
-	// Extract dynamic offset from the last byte of the hash
 	offset := hash[len(hash)-1] & 0xf
-
-	// Extract 4 bytes starting at offset and compute 6-digit code
 	value := (int(hash[offset]&0x7f)<<24 |
 		int(hash[offset+1])<<16 |
 		int(hash[offset+2])<<8 |
 		int(hash[offset+3])) % totpCodeModulus
 
-	// Format the code as a 6-digit string with leading zeros
-	return fmt.Sprintf("%0*d", totpCodeLength, value), nil
+	return fmt.Sprintf("%0*d", m.codeLength, value), nil
 }
 
-// VerifyTOTP checks if a provided TOTP code is valid for the current time
-func VerifyTOTP(seed, code string) bool {
-	// Generate expected TOTP code for the current time
-	expected, err := GenerateTOTP(seed, time.Now())
-	if err != nil {
-		return false
+// VerifyTOTP verifies a TOTP code with a time window
+func (m *TOTPManager) VerifyTOTP(code string, t time.Time) bool {
+	for i := -1; i <= 1; i++ { // Window of ±1 interval
+		checkTime := t.Add(time.Duration(i*m.interval) * time.Second)
+		expected, err := m.GenerateTOTP(&checkTime)
+		if err != nil {
+			if m.log != nil {
+				m.log.Errorf("Failed to generate TOTP for verification: %v", err)
+			}
+			return false
+		}
+		if code == expected {
+			return true
+		}
 	}
-
-	// Compare provided code with expected code
-	return code == expected
+	if m.log != nil {
+		m.log.Warn("TOTP verification failed")
+	}
+	return false
 }

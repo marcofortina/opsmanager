@@ -1,37 +1,84 @@
 package server
 
-import "net/http"
+import (
+	"net/http"
 
-// Security header constants for response hardening.
-const (
-	xssProtection      = "1; mode=block"                                                                                                                                                                                                   // Blocks XSS attacks
-	frameOptions       = "DENY"                                                                                                                                                                                                            // Prevents framing
-	contentTypeOptions = "nosniff"                                                                                                                                                                                                         // Disables MIME sniffing
-	referrerPolicy     = "no-referrer"                                                                                                                                                                                                     // Limits referrer info
-	permissionsPolicy  = "geolocation=(), camera=(), microphone=()"                                                                                                                                                                        // Restricts feature access
-	cacheControl       = "no-store, no-cache, must-revalidate"                                                                                                                                                                             // Prevents caching
-	hsts               = "max-age=31536000; includeSubDomains; preload"                                                                                                                                                                    // Enforces HTTPS for 1 year
-	defaultCSP         = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self';" // Basic CSP
+	"opsmanager/pkg/logger"
 )
 
-// AddSecurityHeaders applies security headers to HTTP responses.
-func AddSecurityHeaders(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Apply security headers
-		w.Header().Set("X-XSS-Protection", xssProtection)
-		w.Header().Set("X-Frame-Options", frameOptions)
-		w.Header().Set("X-Content-Type-Options", contentTypeOptions)
-		w.Header().Set("Referrer-Policy", referrerPolicy)
-		w.Header().Set("Permissions-Policy", permissionsPolicy)
-		w.Header().Set("Cache-Control", cacheControl)
-		w.Header().Set("Content-Security-Policy", defaultCSP)
+// SecurityHeaders manages security headers for HTTP responses
+type SecurityHeaders struct {
+	headers map[string]string
+	csp     string
+	hsts    string
+	log     *logger.Logger
+}
 
-		// Add HSTS if TLS is active
+// SecurityConfig holds configuration for security headers
+type SecurityConfig struct {
+	CSP    string         // Content-Security-Policy (optional override)
+	HSTS   string         // Strict-Transport-Security (optional override)
+	Logger *logger.Logger // Optional logger
+}
+
+// Default security header values
+var defaultHeaders = map[string]string{
+	"X-XSS-Protection":       "1; mode=block",
+	"X-Frame-Options":        "DENY",
+	"X-Content-Type-Options": "nosniff",
+	"Referrer-Policy":        "no-referrer",
+	"Permissions-Policy":     "geolocation=(), camera=(), microphone=()",
+	"Cache-Control":          "no-store, no-cache, must-revalidate",
+}
+
+const (
+	defaultCSP  = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'"
+	defaultHSTS = "max-age=31536000; includeSubDomains; preload"
+)
+
+// NewSecurityHeaders creates a new SecurityHeaders instance
+func NewSecurityHeaders(cfg SecurityConfig) *SecurityHeaders {
+	headers := make(map[string]string)
+	for k, v := range defaultHeaders {
+		headers[k] = v
+	}
+
+	csp := defaultCSP
+	if cfg.CSP != "" {
+		csp = cfg.CSP
+	}
+
+	hsts := defaultHSTS
+	if cfg.HSTS != "" {
+		hsts = cfg.HSTS
+	}
+
+	return &SecurityHeaders{
+		headers: headers,
+		csp:     csp,
+		hsts:    hsts,
+		log:     cfg.Logger,
+	}
+}
+
+// Middleware applies security headers to HTTP responses
+func (sh *SecurityHeaders) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for k, v := range sh.headers {
+			w.Header().Set(k, v)
+		}
+		w.Header().Set("Content-Security-Policy", sh.csp)
+
 		if r.TLS != nil {
-			w.Header().Set("Strict-Transport-Security", hsts)
+			w.Header().Set("Strict-Transport-Security", sh.hsts)
+			if sh.log != nil {
+				sh.log.Debug("Applied HSTS header for TLS request")
+			}
 		}
 
-		// Proceed to next handler
+		if sh.log != nil {
+			sh.log.Debugf("Applied security headers to %s", r.URL.Path)
+		}
 		next.ServeHTTP(w, r)
 	})
 }

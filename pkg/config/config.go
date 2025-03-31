@@ -3,77 +3,139 @@ package config
 import (
 	"encoding/hex"
 	"fmt"
-	"os"
+	"strings"
 
-	"gopkg.in/yaml.v3"
+	"opsmanager/pkg/logger"
+
+	"github.com/spf13/viper"
 )
 
 // Config holds the application configuration
 type Config struct {
-	Server struct {
-		ListenAddress string `yaml:"listen_address"`  // Server listen address
-		Port          string `yaml:"port"`            // Server port
-		EnableTLS     bool   `yaml:"enable_tls"`      // Enable TLS for server
-		TLSCertFile   string `yaml:"tls_cert_file"`   // TLS certificate file
-		TLSKeyFile    string `yaml:"tls_key_file"`    // TLS private key file
-		TLSCAFile     string `yaml:"tls_ca_file"`     // TLS CA certificate file
-		TLSMinVersion string `yaml:"tls_min_version"` // Minimum TLS version (TLSv1.1, TLSv1.2, TLSv1.3)
-	} `yaml:"server"`
-	Etcd struct {
-		Endpoints   []string `yaml:"endpoints"`     // Etcd connection endpoints
-		EnableTLS   bool     `yaml:"enable_tls"`    // Enable TLS for etcd
-		TLSCertFile string   `yaml:"tls_cert_file"` // Etcd TLS certificate file
-		TLSKeyFile  string   `yaml:"tls_key_file"`  // Etcd TLS private key file
-	} `yaml:"etcd"`
-	Encryption struct {
-		Key string `yaml:"key"` // AES encryption key
-	} `yaml:"encryption"`
-	TwoFactor struct {
-		Enabled bool   `yaml:"enabled"` // Enable two-factor authentication
-		Secret  string `yaml:"secret"`  // Two-factor authentication secret
-	} `yaml:"two_factor"`
-	Logging struct {
-		DebugMode  bool   `yaml:"debug_mode"`  // Enable debug logging
-		AccessFile string `yaml:"access_file"` // Access log file path
-	} `yaml:"logging"`
+	Server     ServerConfig     `mapstructure:"server"`
+	Etcd       EtcdConfig       `mapstructure:"etcd"`
+	Encryption EncryptionConfig `mapstructure:"encryption"`
+	TwoFactor  TwoFactorConfig  `mapstructure:"two_factor"`
+	Logging    LoggingConfig    `mapstructure:"logging"`
 }
 
-// Default configuration values
-const (
-	defaultListenAddress = "0.0.0.0"    // Default server listen address (all interfaces)
-	defaultPort          = "8080"       // Default server port
-	defaultAccessFile    = "access.log" // Default access log file path
-	defaultTLSMinVersion = "TLSv1.2"    // Default minimum TLS version
-	aesKeyLength         = 32           // Required AES key length in bytes
-)
+// ServerConfig holds server settings
+type ServerConfig struct {
+	ListenAddress string    `mapstructure:"listen_address"`
+	Port          string    `mapstructure:"port"`
+	EnableTLS     bool      `mapstructure:"enable_tls"`
+	TLS           TLSConfig `mapstructure:"tls"`
+}
 
-// Valid TLS versions
-var validTLSVersions = []string{"TLSv1.1", "TLSv1.2", "TLSv1.3"}
+// TLSConfig holds TLS settings
+type TLSConfig struct {
+	CertFile   string `mapstructure:"cert_file"`
+	KeyFile    string `mapstructure:"key_file"`
+	CAFile     string `mapstructure:"ca_file"`
+	MinVersion string `mapstructure:"min_version"`
+}
 
-// Load loads configuration from a YAML file
-func Load(path string) (*Config, error) {
-	// Read configuration file
-	data, err := os.ReadFile(path)
+// EtcdConfig holds etcd settings
+type EtcdConfig struct {
+	Endpoints []string  `mapstructure:"endpoints"`
+	EnableTLS bool      `mapstructure:"enable_tls"`
+	TLS       TLSConfig `mapstructure:"tls"` // Aggiornato con sottostruttura TLS
+}
+
+// EncryptionConfig holds encryption settings
+type EncryptionConfig struct {
+	Key string `mapstructure:"key"`
+}
+
+// TwoFactorConfig holds 2FA settings
+type TwoFactorConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	Secret  string `mapstructure:"secret"`
+}
+
+// LoggingConfig holds logging settings
+type LoggingConfig struct {
+	DebugMode  bool   `mapstructure:"debug_mode"`
+	AccessFile string `mapstructure:"access_file"`
+	Level      string `mapstructure:"level"`
+}
+
+// Default configuration values aligned with new config.yaml
+var defaults = map[string]interface{}{
+	"server.listen_address":  "0.0.0.0",
+	"server.port":            ":8443",
+	"server.enable_tls":      true,
+	"server.tls.cert_file":   "certs/server-cert.pem",
+	"server.tls.key_file":    "certs/server-key.pem",
+	"server.tls.ca_file":     "certs/ca-cert.pem",
+	"server.tls.min_version": "TLSv1.3",
+	"etcd.endpoints":         []string{"localhost:2379"},
+	"etcd.enable_tls":        true,
+	"etcd.tls.cert_file":     "certs/client-cert.pem", // Aggiornato
+	"etcd.tls.key_file":      "certs/client-key.pem",  // Aggiornato
+	"logging.debug_mode":     true,
+	"logging.access_file":    "logs/access.log",
+	"logging.level":          "info",
+	"two_factor.enabled":     true,
+}
+
+// ValidTLSVersions maps valid TLS versions
+var ValidTLSVersions = map[string]struct{}{
+	"TLSv1.1": {},
+	"TLSv1.2": {},
+	"TLSv1.3": {},
+}
+
+// ValidLogLevels maps valid log levels
+var ValidLogLevels = map[string]struct{}{
+	"debug": {},
+	"info":  {},
+	"warn":  {},
+	"error": {},
+}
+
+// Load loads configuration from a YAML file and environment variables
+func Load(path string, log *logger.Logger) (*Config, error) {
+	v := viper.New()
+	v.SetConfigFile(path)
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+
+	// Set defaults
+	for key, value := range defaults {
+		v.SetDefault(key, value)
+	}
+
+	// Read config file, fallback to defaults if not found
+	err := v.ReadInConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %v", err)
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			log.Warnf("Config file %s not found, using defaults with env overrides", path)
+		} else {
+			log.Errorf("Failed to read config file %s: %v", path, err)
+			return nil, fmt.Errorf("failed to read config file: %v", err)
+		}
 	}
 
-	// Parse YAML into Config struct
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %v", err)
+	if err := v.Unmarshal(&cfg); err != nil {
+		log.Errorf("Failed to unmarshal config: %v", err)
+		return nil, fmt.Errorf("failed to unmarshal config: %v", err)
 	}
 
-	// Process and validate AES encryption key
+	// Debug: Log the loaded config
+	log.Infof("Loaded config: Server=%+v, Etcd=%+v, Encryption=%+v, TwoFactor=%+v, Logging=%+v",
+		cfg.Server, cfg.Etcd, cfg.Encryption, cfg.TwoFactor, cfg.Logging)
+
+	// Process AES key
 	if err := processAESKey(&cfg); err != nil {
+		log.Errorf("Failed to process AES key: %v", err)
 		return nil, err
 	}
 
-	// Set default values if not specified
-	setDefaultValues(&cfg)
-
 	// Validate configuration
 	if err := validateConfig(&cfg); err != nil {
+		log.Errorf("Invalid configuration: %v", err)
 		return nil, err
 	}
 
@@ -82,61 +144,44 @@ func Load(path string) (*Config, error) {
 
 // processAESKey decodes and validates the AES encryption key
 func processAESKey(cfg *Config) error {
-	var aesKeyBytes []byte
-	if len(cfg.Encryption.Key) == 64 {
+	const aesKeyLength = 32
+	var keyBytes []byte
+	if len(cfg.Encryption.Key) == 64 { // Assume hex-encoded if 64 chars
 		var err error
-		aesKeyBytes, err = hex.DecodeString(cfg.Encryption.Key)
+		keyBytes, err = hex.DecodeString(cfg.Encryption.Key)
 		if err != nil {
-			return fmt.Errorf("failed to decode hex-encoded AES key: %v", err)
+			return fmt.Errorf("failed to decode hex AES key: %v", err)
 		}
 	} else {
-		aesKeyBytes = []byte(cfg.Encryption.Key)
+		keyBytes = []byte(cfg.Encryption.Key)
 	}
-
-	// Ensure AES key is 32 bytes
-	if len(aesKeyBytes) != aesKeyLength {
-		return fmt.Errorf("invalid AES key length: got %d bytes, expected %d", len(aesKeyBytes), aesKeyLength)
+	if len(keyBytes) != aesKeyLength {
+		return fmt.Errorf("invalid AES key length: got %d, expected %d", len(keyBytes), aesKeyLength)
 	}
-	cfg.Encryption.Key = string(aesKeyBytes)
+	cfg.Encryption.Key = string(keyBytes)
 	return nil
 }
 
-// setDefaultValues applies default values to unspecified fields
-func setDefaultValues(cfg *Config) {
-	if cfg.Server.ListenAddress == "" {
-		cfg.Server.ListenAddress = defaultListenAddress
-	}
-	if cfg.Server.Port == "" {
-		cfg.Server.Port = defaultPort
-	}
-	if cfg.Logging.AccessFile == "" {
-		cfg.Logging.AccessFile = defaultAccessFile
-	}
-	if cfg.Server.EnableTLS && cfg.Server.TLSMinVersion == "" {
-		cfg.Server.TLSMinVersion = defaultTLSMinVersion
-	}
-}
-
-// validateConfig checks the configuration for required fields and valid values
+// validateConfig validates the configuration
 func validateConfig(cfg *Config) error {
-	// Ensure two-factor secret is present if 2FA is enabled
 	if cfg.TwoFactor.Enabled && cfg.TwoFactor.Secret == "" {
-		return fmt.Errorf("two_factor.secret is required when two_factor.enabled is true")
+		return fmt.Errorf("two_factor.secret required when enabled")
 	}
-
-	// Validate TLS minimum version if TLS is enabled
 	if cfg.Server.EnableTLS {
-		valid := false
-		for _, v := range validTLSVersions {
-			if cfg.Server.TLSMinVersion == v {
-				valid = true
-				break
-			}
+		if cfg.Server.TLS.CertFile == "" || cfg.Server.TLS.KeyFile == "" {
+			return fmt.Errorf("TLS enabled but cert_file or key_file missing")
 		}
-		if !valid {
-			return fmt.Errorf("invalid tls_min_version '%s'; must be one of %v", cfg.Server.TLSMinVersion, validTLSVersions)
+		if _, ok := ValidTLSVersions[cfg.Server.TLS.MinVersion]; !ok {
+			return fmt.Errorf("invalid tls.min_version '%s'; must be TLSv1.1, TLSv1.2, or TLSv1.3", cfg.Server.TLS.MinVersion)
 		}
 	}
-
+	if cfg.Etcd.EnableTLS {
+		if cfg.Etcd.TLS.CertFile == "" || cfg.Etcd.TLS.KeyFile == "" {
+			return fmt.Errorf("etcd TLS enabled but cert_file or key_file missing")
+		}
+	}
+	if _, ok := ValidLogLevels[cfg.Logging.Level]; !ok {
+		return fmt.Errorf("invalid logging.level '%s'; must be debug, info, warn, or error", cfg.Logging.Level)
+	}
 	return nil
 }

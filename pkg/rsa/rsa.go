@@ -7,114 +7,153 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"log"
+	"time"
 
 	"opsmanager/pkg/crypto"
 	"opsmanager/pkg/etcd"
+	"opsmanager/pkg/logger"
 )
 
-// KeyManager manages RSA key generation and storage.
+// KeyManager manages RSA key generation and storage
 type KeyManager struct {
-	privateKey *rsa.PrivateKey // RSA private key
-	encrypted  []byte          // Encrypted key bytes (for debugging or reuse)
+	privateKey *rsa.PrivateKey
+	encrypted  []byte
+	log        *logger.Logger
+	etcd       *etcd.Client
+	aesMgr     *crypto.AESManager
+	keyPath    string
+	keySize    int
 }
 
-// RSA configuration constants.
+// KeyManagerConfig holds configuration for KeyManager
+type KeyManagerConfig struct {
+	KeySize    int
+	KeyPath    string
+	AESKey     []byte
+	EtcdClient *etcd.Client
+	Logger     *logger.Logger
+}
+
+// Default RSA constants
 const (
-	keySize     = 2048              // Size of the RSA key in bits
-	keyEtcdPath = "rsa_private_key" // Etcd path for the encrypted RSA key
+	DefaultKeySize   = 2048              // Default RSA key size in bits
+	DefaultKeyPath   = "rsa_private_key" // Default etcd path for encrypted key
+	DefaultOpTimeout = 2 * time.Second   // Default timeout for etcd operations
 )
 
-// NewKeyManager initializes a KeyManager with an RSA key from etcd or generates a new one.
-func NewKeyManager(ctx context.Context, logger *log.Logger, etcdClient *etcd.Client, aesKey []byte) (*KeyManager, error) {
-	if len(aesKey) == 0 {
-		return nil, fmt.Errorf("AES key cannot be empty")
+// NewKeyManager initializes a KeyManager with an RSA key from etcd or generates a new one
+func NewKeyManager(cfg KeyManagerConfig) (*KeyManager, error) {
+	if cfg.KeySize < 2048 {
+		cfg.KeySize = DefaultKeySize
+	}
+	if cfg.KeyPath == "" {
+		cfg.KeyPath = DefaultKeyPath
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = logger.Default()
 	}
 
-	logger.Printf("Checking for RSA key in etcd at %s", keyEtcdPath)
-	encryptedKey, err := etcdClient.GetSession(ctx, keyEtcdPath)
+	aesMgr, err := crypto.NewAESManager(cfg.AESKey, cfg.Logger)
 	if err != nil {
-		logger.Printf("Failed to retrieve RSA key from etcd: %v", err)
-		return nil, fmt.Errorf("failed to get RSA key from etcd: %w", err)
+		return nil, fmt.Errorf("failed to initialize AES manager: %v", err)
+	}
+
+	km := &KeyManager{
+		log:     cfg.Logger,
+		etcd:    cfg.EtcdClient,
+		aesMgr:  aesMgr,
+		keyPath: cfg.KeyPath,
+		keySize: cfg.KeySize,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultOpTimeout)
+	defer cancel()
+
+	encryptedKey, err := cfg.EtcdClient.GetSession(ctx, cfg.KeyPath)
+	if err != nil {
+		km.log.Errorf("Failed to retrieve RSA key from etcd: %v", err)
+		return nil, fmt.Errorf("failed to get RSA key: %v", err)
 	}
 
 	if encryptedKey == "" {
-		return generateNewKey(ctx, logger, etcdClient, aesKey)
+		return km.generateNewKey(ctx)
 	}
-	return loadExistingKey(logger, aesKey, encryptedKey)
+	return km.loadExistingKey(encryptedKey)
 }
 
-// generateNewKey creates and stores a new RSA private key.
-func generateNewKey(ctx context.Context, logger *log.Logger, etcdClient *etcd.Client, aesKey []byte) (*KeyManager, error) {
-	logger.Printf("Generating new %d-bit RSA key", keySize)
+// generateNewKey creates and stores a new RSA private key
+func (km *KeyManager) generateNewKey(ctx context.Context) (*KeyManager, error) {
+	km.log.Infof("Generating new %d-bit RSA key", km.keySize)
 
-	// Generate RSA key
-	privateKey, err := rsa.GenerateKey(rand.Reader, keySize)
+	privateKey, err := rsa.GenerateKey(rand.Reader, km.keySize)
 	if err != nil {
-		logger.Printf("Failed to generate %d-bit RSA key: %v", keySize, err)
-		return nil, fmt.Errorf("failed to generate RSA key: %w", err)
+		km.log.Errorf("Failed to generate RSA key: %v", err)
+		return nil, fmt.Errorf("failed to generate RSA key: %v", err)
 	}
 
-	// Encode to PEM
 	privateKeyPEM := pem.EncodeToMemory(&pem.Block{
 		Type:  "RSA PRIVATE KEY",
 		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
 	})
 
-	// Encrypt with AES
-	encryptedKey, err := crypto.EncryptAES(aesKey, privateKeyPEM)
+	encryptedKey, err := km.aesMgr.EncryptAES(privateKeyPEM)
 	if err != nil {
-		logger.Printf("Failed to encrypt RSA key: %v", err)
-		return nil, fmt.Errorf("failed to encrypt RSA key: %w", err)
+		km.log.Errorf("Failed to encrypt RSA key: %v", err)
+		return nil, fmt.Errorf("failed to encrypt RSA key: %v", err)
 	}
 
-	// Store in etcd (persistent)
-	if err := etcdClient.StoreSession(ctx, keyEtcdPath, string(encryptedKey)); err != nil {
-		logger.Printf("Failed to store RSA key in etcd at %s: %v", keyEtcdPath, err)
-		return nil, fmt.Errorf("failed to store RSA key in etcd: %w", err)
+	if err := km.etcd.StoreSession(ctx, km.keyPath, string(encryptedKey)); err != nil {
+		km.log.Errorf("Failed to store RSA key at %s: %v", km.keyPath, err)
+		return nil, fmt.Errorf("failed to store RSA key: %v", err)
 	}
 
-	logger.Printf("Generated and stored %d-bit RSA key successfully", keySize)
-	return &KeyManager{
-		privateKey: privateKey,
-		encrypted:  encryptedKey,
-	}, nil
+	km.privateKey = privateKey
+	km.encrypted = encryptedKey
+	km.log.Infof("Generated and stored %d-bit RSA key", km.keySize)
+	return km, nil
 }
 
-// loadExistingKey decrypts and loads an RSA private key from etcd.
-func loadExistingKey(logger *log.Logger, aesKey []byte, encryptedKey string) (*KeyManager, error) {
-	// Decrypt the key
-	decryptedPEM, err := crypto.DecryptAES(aesKey, []byte(encryptedKey))
+// loadExistingKey decrypts and loads an RSA private key
+func (km *KeyManager) loadExistingKey(encryptedKey string) (*KeyManager, error) {
+	decryptedPEM, err := km.aesMgr.DecryptAES([]byte(encryptedKey))
 	if err != nil {
-		logger.Printf("Failed to decrypt RSA key: %v", err)
-		return nil, fmt.Errorf("failed to decrypt RSA key: %w", err)
+		km.log.Errorf("Failed to decrypt RSA key: %v", err)
+		return nil, fmt.Errorf("failed to decrypt RSA key: %v", err)
 	}
 
-	// Decode PEM
 	block, rest := pem.Decode(decryptedPEM)
 	if block == nil || block.Type != "RSA PRIVATE KEY" {
-		logger.Printf("Invalid PEM format or type for RSA key")
+		km.log.Errorf("Invalid PEM format or type for RSA key")
 		return nil, fmt.Errorf("invalid PEM format or type")
 	}
 	if len(rest) > 0 {
-		logger.Printf("Ignoring extra data after PEM block (%d bytes)", len(rest))
+		km.log.Warnf("Extra data after PEM block: %d bytes", len(rest))
 	}
 
-	// Parse RSA private key
 	privateKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
 	if err != nil {
-		logger.Printf("Failed to parse RSA key: %v", err)
-		return nil, fmt.Errorf("failed to parse RSA key: %w", err)
+		km.log.Errorf("Failed to parse RSA key: %v", err)
+		return nil, fmt.Errorf("failed to parse RSA key: %v", err)
 	}
 
-	logger.Printf("Loaded RSA key successfully from etcd")
-	return &KeyManager{
-		privateKey: privateKey,
-		encrypted:  []byte(encryptedKey),
-	}, nil
+	km.privateKey = privateKey
+	km.encrypted = []byte(encryptedKey)
+	km.log.Infof("Loaded RSA key from etcd")
+	return km, nil
 }
 
-// PrivateKey returns the managed RSA private key.
+// PrivateKey returns the RSA private key
 func (km *KeyManager) PrivateKey() *rsa.PrivateKey {
 	return km.privateKey
+}
+
+// RefreshKey regenerates and stores a new RSA key
+func (km *KeyManager) RefreshKey(ctx context.Context) error {
+	newKM, err := km.generateNewKey(ctx)
+	if err != nil {
+		return err
+	}
+	km.privateKey = newKM.privateKey
+	km.encrypted = newKM.encrypted
+	return nil
 }

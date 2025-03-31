@@ -2,88 +2,116 @@ package auth
 
 import (
 	"crypto/rsa"
+	"errors"
 	"fmt"
 	"time"
+
+	"opsmanager/pkg/logger"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// JWTManager handles JWT generation and verification
+// JWTManager manages JWT generation and verification
 type JWTManager struct {
-	privateKey *rsa.PrivateKey // RSA private key for signing tokens
+	privateKey *rsa.PrivateKey
+	publicKey  *rsa.PublicKey
+	issuer     string
+	log        *logger.Logger
+}
+
+// JWTConfig holds configuration for JWTManager
+type JWTConfig struct {
+	PrivateKey *rsa.PrivateKey
+	Issuer     string
+	Logger     *logger.Logger
 }
 
 // Claim keys used in JWT tokens
 const (
-	claimSubject   = "sub" // Subject claim (username)
-	claimExpiresAt = "exp" // Expiration time claim
+	ClaimSubject   = "sub" // Subject claim (username)
+	ClaimExpiresAt = "exp" // Expiration time claim
+	ClaimIssuer    = "iss" // Issuer claim
 )
 
-// NewJWTManager creates a new JWTManager instance
-func NewJWTManager(privateKey *rsa.PrivateKey) (*JWTManager, error) {
-	// Ensure private key is provided
-	if privateKey == nil {
-		return nil, fmt.Errorf("private key cannot be nil")
+// NewJWTManager initializes a new JWTManager with configuration
+func NewJWTManager(cfg JWTConfig) (*JWTManager, error) {
+	if cfg.PrivateKey == nil {
+		return nil, errors.New("private key cannot be nil")
 	}
-	return &JWTManager{privateKey: privateKey}, nil
+	if err := cfg.PrivateKey.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid private key: %v", err)
+	}
+	return &JWTManager{
+		privateKey: cfg.PrivateKey,
+		publicKey:  cfg.PrivateKey.Public().(*rsa.PublicKey),
+		issuer:     cfg.Issuer,
+		log:        cfg.Logger,
+	}, nil
 }
 
 // GenerateToken generates a JWT token with custom expiration
 func (m *JWTManager) GenerateToken(username string, expiration time.Duration) (string, error) {
-	// Create claims with username and expiration
 	claims := jwt.MapClaims{
-		claimSubject:   username,
-		claimExpiresAt: time.Now().Add(expiration).Unix(),
+		ClaimSubject:   username,
+		ClaimExpiresAt: time.Now().Add(expiration).Unix(),
+	}
+	if m.issuer != "" {
+		claims[ClaimIssuer] = m.issuer
 	}
 
-	// Create token with RS256 signing method
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-
-	// Sign token using the private key
-	return token.SignedString(m.privateKey)
+	signedToken, err := token.SignedString(m.privateKey)
+	if err != nil && m.log != nil {
+		m.log.Errorf("Failed to sign JWT for %s: %v", username, err)
+	}
+	return signedToken, err
 }
 
-// VerifyToken verifies a JWT token and returns its claims if valid
+// VerifyToken verifies a JWT token and returns its claims
 func (m *JWTManager) VerifyToken(tokenString string) (jwt.MapClaims, error) {
-	// Parse and verify the token
 	token, err := m.parseToken(tokenString)
 	if err != nil {
 		return nil, err
 	}
-
-	// Verify token validity and extract claims
-	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-		return claims, nil
-	}
-	return nil, fmt.Errorf("invalid token")
+	return m.validateClaims(token)
 }
 
 // GetUsernameFromToken extracts the username from a JWT token
 func (m *JWTManager) GetUsernameFromToken(tokenString string) (string, error) {
-	// Parse and verify the token
-	token, err := m.parseToken(tokenString)
+	claims, err := m.VerifyToken(tokenString)
 	if err != nil {
 		return "", err
 	}
-
-	// Verify token validity and extract username from claims
-	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-		if sub, ok := claims[claimSubject].(string); ok {
-			return sub, nil
-		}
-		return "", fmt.Errorf("invalid token: missing or invalid subject")
+	username, ok := claims[ClaimSubject].(string)
+	if !ok {
+		return "", errors.New("invalid token: missing or invalid subject")
 	}
-	return "", fmt.Errorf("invalid token")
+	return username, nil
 }
 
-// parseToken parses and verifies a JWT token with the RSA public key
+// parseToken parses and verifies a JWT token using the public key
 func (m *JWTManager) parseToken(tokenString string) (*jwt.Token, error) {
-	return jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		// Validate signing method is RSA
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
-		// Provide public key for verification
-		return m.privateKey.Public(), nil
+		return m.publicKey, nil
 	})
+	if err != nil && m.log != nil {
+		m.log.Warnf("JWT parsing failed: %v", err)
+	}
+	return token, err
+}
+
+// validateClaims checks token validity and returns claims
+func (m *JWTManager) validateClaims(token *jwt.Token) (jwt.MapClaims, error) {
+	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		if m.issuer != "" {
+			if iss, ok := claims[ClaimIssuer].(string); !ok || iss != m.issuer {
+				return nil, errors.New("invalid token: issuer mismatch")
+			}
+		}
+		return claims, nil
+	}
+	return nil, errors.New("invalid token")
 }

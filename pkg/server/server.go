@@ -4,137 +4,244 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"opsmanager/pkg/auth"
 	"opsmanager/pkg/config"
 	"opsmanager/pkg/etcd"
 	"opsmanager/pkg/handlers"
+	"opsmanager/pkg/logger"
 	"opsmanager/pkg/middleware"
 	"opsmanager/pkg/rsa"
 )
 
-// Server represents the web server.
+// Server represents the web server
 type Server struct {
-	http.Server                // Embedded HTTP server
-	cfg         *config.Config // Server configuration
-	logger      *log.Logger    // Application logger
-	accessLog   *log.Logger    // Access logger for requests
+	httpServer    *http.Server
+	cfg           *config.Config
+	log           *logger.Logger
+	accessLog     *logger.Logger
+	accessFile    *os.File
+	handler       *handlers.Handler
+	etcdClient    *etcd.Client
+	staticHandler *StaticHandler
 }
 
-// New initializes a new Server instance.
-func New(cfg *config.Config, logger *log.Logger) *Server {
-	// Open access log file
-	accessFile, err := os.OpenFile(cfg.Logging.AccessFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		logger.Fatalf("Failed to open access log at %s: %v", cfg.Logging.AccessFile, err)
+// ServerConfig holds configuration for Server
+type ServerConfig struct {
+	Config      *config.Config
+	Logger      *logger.Logger
+	TemplateDir string
+}
+
+// New initializes a new Server instance
+func New(cfg ServerConfig) *Server {
+	if cfg.Logger == nil {
+		cfg.Logger = logger.Default()
 	}
-	accessLog := log.New(accessFile, "", log.LstdFlags)
+
+	// Open access log file
+	accessFile, err := os.OpenFile(cfg.Config.Logging.AccessFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		cfg.Logger.Fatalf("Failed to open access log at %s: %v", cfg.Config.Logging.AccessFile, err)
+	}
+	accessLog := logger.New(cfg.Config.Logging.DebugMode)
+	accessLog.SetOutput(accessFile)
 
 	// Initialize etcd client
-	logger.Printf("Initializing etcd client")
-	etcdClient, err := etcd.NewClient(cfg, logger)
+	cfg.Logger.Infof("Initializing etcd client")
+	etcdCfg := etcd.EtcdConfig{
+		Endpoints:   cfg.Config.Etcd.Endpoints,
+		EnableTLS:   cfg.Config.Etcd.EnableTLS,
+		TLSCertFile: cfg.Config.Etcd.TLS.CertFile,
+		TLSKeyFile:  cfg.Config.Etcd.TLS.KeyFile,
+		TLSCAFile:   cfg.Config.Server.TLS.CAFile,
+		DialTimeout: 5 * time.Second,
+		Logger:      cfg.Logger,
+	}
+	etcdClient, err := etcd.NewClient(etcdCfg)
 	if err != nil {
-		logger.Fatalf("Failed to initialize etcd client: %v", err)
+		cfg.Logger.Fatalf("Failed to initialize etcd client: %v", err)
 	}
 
-	// Initialize RSA key manager with context
-	logger.Printf("Initializing RSA key manager")
-	ctx := context.Background()
-	rsaMgr, err := rsa.NewKeyManager(ctx, logger, etcdClient, []byte(cfg.Encryption.Key))
+	// Initialize RSA key manager
+	cfg.Logger.Infof("Initializing RSA key manager")
+	rsaCfg := rsa.KeyManagerConfig{
+		KeySize:    rsa.DefaultKeySize,
+		KeyPath:    rsa.DefaultKeyPath,
+		AESKey:     []byte(cfg.Config.Encryption.Key),
+		EtcdClient: etcdClient,
+		Logger:     cfg.Logger,
+	}
+	rsaMgr, err := rsa.NewKeyManager(rsaCfg)
 	if err != nil {
-		logger.Fatalf("Failed to initialize RSA key manager: %v", err)
+		cfg.Logger.Fatalf("Failed to initialize RSA key manager: %v", err)
 	}
 
 	// Initialize JWT manager
-	logger.Printf("Initializing JWT manager")
-	jwtMgr, err := auth.NewJWTManager(rsaMgr.PrivateKey())
+	cfg.Logger.Infof("Initializing JWT manager")
+	jwtCfg := auth.JWTConfig{
+		PrivateKey: rsaMgr.PrivateKey(),
+		Logger:     cfg.Logger,
+	}
+	jwtMgr, err := auth.NewJWTManager(jwtCfg)
 	if err != nil {
-		logger.Fatalf("Failed to initialize JWT manager: %v", err)
+		cfg.Logger.Fatalf("Failed to initialize JWT manager: %v", err)
 	}
 
 	// Initialize CSRF manager
-	logger.Printf("Initializing CSRF manager")
-	csrfMgr := auth.NewCSRFManager()
+	cfg.Logger.Infof("Initializing CSRF manager")
+	csrfMgr := auth.NewCSRFManager(auth.CSRFTokenLength, cfg.Logger)
 
 	// Initialize login manager
-	logger.Printf("Initializing login manager")
-	loginMgr := auth.NewLoginManager(logger)
-
-	// Initialize handlers
-	logger.Printf("Initializing handlers")
-	h, err := handlers.New("./templates", jwtMgr, csrfMgr, loginMgr, etcdClient, logger, cfg)
+	cfg.Logger.Infof("Initializing login manager")
+	loginMgr, err := auth.NewLoginManager(cfg.Logger, "admin", "secret123") // Hardcoded temporaneo
 	if err != nil {
-		logger.Fatalf("Failed to initialize handlers: %v", err)
+		cfg.Logger.Fatalf("Failed to initialize login manager: %v", err)
 	}
 
-	// Configure HTTP multiplexer with routes
+	// Initialize TOTP manager
+	cfg.Logger.Infof("Initializing TOTP manager")
+	totpCfg := &auth.TOTPConfig{
+		Seed:       cfg.Config.TwoFactor.Secret,
+		Interval:   auth.DefaultTOTPInterval,
+		CodeLength: auth.DefaultTOTPCodeLength,
+		Logger:     cfg.Logger,
+	}
+	totpMgr, err := auth.NewTOTPManager(totpCfg)
+	if err != nil {
+		cfg.Logger.Fatalf("Failed to initialize TOTP manager: %v", err)
+	}
+
+	// Initialize handlers
+	cfg.Logger.Infof("Initializing handlers")
+	handlerCfg := handlers.HandlerConfig{
+		TemplateDir: cfg.TemplateDir,
+		JWTMgr:      jwtMgr,
+		CSRFMgr:     csrfMgr,
+		LoginMgr:    loginMgr,
+		TotpMgr:     totpMgr, // Aggiunto
+		Etcd:        etcdClient,
+		Logger:      cfg.Logger,
+		Config:      cfg.Config,
+		OpTimeout:   2 * time.Second,
+	}
+	h, err := handlers.New(handlerCfg)
+	if err != nil {
+		cfg.Logger.Fatalf("Failed to initialize handlers: %v", err)
+	}
+
+	// Initialize static handler
+	staticHandler := NewStaticHandler(StaticConfig{
+		Dir:    "./static",
+		Logger: cfg.Logger,
+	})
+
+	// Configure routes
 	mux := http.NewServeMux()
 	mux.HandleFunc("/login", h.Login)
 	mux.HandleFunc("/logout", h.Logout)
 	mux.HandleFunc("/verify-2fa", h.Verify2FA)
-	mux.Handle("/dashboard", middleware.Auth(jwtMgr, logger)(http.HandlerFunc(h.Dashboard)))
-	mux.Handle("/config", middleware.Auth(jwtMgr, logger)(http.HandlerFunc(h.Config)))
+	authMw := middleware.NewAuth(middleware.AuthConfig{JWTMgr: jwtMgr, Logger: cfg.Logger})
+	mux.Handle("/dashboard", authMw.Middleware(http.HandlerFunc(h.Dashboard)))
+	mux.Handle("/config", authMw.Middleware(http.HandlerFunc(h.Config)))
+	staticHandler.AddStaticHandlers(mux) // Aggiornato
 
-	// Add static file handlers
-	AddStaticHandlers(mux)
-
-	// Apply middleware for logging and security headers
-	handler := AddSecurityHeaders(accessLogger(accessLog, jwtMgr, mux))
-
-	// Set server address
-	addr := cfg.Server.ListenAddress + ":" + cfg.Server.Port
+	// Apply middleware
+	accessCfg := AccessConfig{
+		Logger:     accessLog,
+		JWTMgr:     jwtMgr,
+		CookieName: "jwt_token",
+		UseJSON:    false,
+	}
+	accessMw := NewAccessLogger(accessCfg)
+	securityMw := NewSecurityHeaders(SecurityConfig{Logger: cfg.Logger})
+	handler := securityMw.Middleware(accessMw.Middleware(mux))
 
 	// Initialize server
+	addr := cfg.Config.Server.ListenAddress + ":" + cfg.Config.Server.Port
 	srv := &Server{
-		Server: http.Server{
+		httpServer: &http.Server{
 			Addr:    addr,
 			Handler: handler,
 		},
-		cfg:       cfg,
-		logger:    logger,
-		accessLog: accessLog,
+		cfg:           cfg.Config,
+		log:           cfg.Logger,
+		accessLog:     accessLog,
+		accessFile:    accessFile,
+		handler:       h,
+		etcdClient:    etcdClient,
+		staticHandler: staticHandler, // Aggiunto
 	}
 
-	// Configure TLS if enabled
-	if cfg.Server.EnableTLS {
-		srv.configureTLS(cfg, logger)
+	if cfg.Config.Server.EnableTLS {
+		srv.configureTLS()
 	}
 
 	return srv
 }
 
-// configureTLS sets up TLS configuration for the server.
-func (s *Server) configureTLS(cfg *config.Config, logger *log.Logger) {
+// configureTLS sets up TLS configuration
+func (s *Server) configureTLS() {
 	tlsConfig := &tls.Config{
-		MinVersion: tls.VersionTLS12, // Enforce TLS 1.2 or higher
+		MinVersion: tlsVersionFromString(s.cfg.Server.TLS.MinVersion), // Aggiornato
 	}
 
-	// Load CA certificate if specified
-	if cfg.Server.TLSCAFile != "" {
-		caCert, err := os.ReadFile(cfg.Server.TLSCAFile)
+	if s.cfg.Server.TLS.CAFile != "" { // Aggiornato
+		caCert, err := os.ReadFile(s.cfg.Server.TLS.CAFile)
 		if err != nil {
-			logger.Fatalf("Failed to read CA file %s: %v", cfg.Server.TLSCAFile, err)
+			s.log.Fatalf("Failed to read CA file %s: %v", s.cfg.Server.TLS.CAFile, err)
 		}
 		caCertPool := x509.NewCertPool()
 		if !caCertPool.AppendCertsFromPEM(caCert) {
-			logger.Fatalf("Failed to parse CA certificate from %s", cfg.Server.TLSCAFile)
+			s.log.Fatalf("Failed to parse CA certificate from %s", s.cfg.Server.TLS.CAFile)
 		}
 		tlsConfig.RootCAs = caCertPool
-		logger.Printf("Loaded CA certificate from %s", cfg.Server.TLSCAFile)
+		s.log.Infof("Loaded CA certificate from %s", s.cfg.Server.TLS.CAFile)
 	}
 
-	s.TLSConfig = tlsConfig
+	s.httpServer.TLSConfig = tlsConfig
 }
 
-// Run starts the server.
-func (s *Server) Run() error {
-	s.logger.Printf("Starting server on %s (TLS=%v)", s.Addr, s.cfg.Server.EnableTLS)
-	defer s.accessLog.Writer().(*os.File).Close() // Close access log file on exit
-	if s.cfg.Server.EnableTLS {
-		return s.ListenAndServeTLS(s.cfg.Server.TLSCertFile, s.cfg.Server.TLSKeyFile)
+// tlsVersionFromString converts TLS version string to uint16
+func tlsVersionFromString(version string) uint16 {
+	switch version {
+	case "TLSv1.1":
+		return tls.VersionTLS11
+	case "TLSv1.2":
+		return tls.VersionTLS12
+	case "TLSv1.3":
+		return tls.VersionTLS13
+	default:
+		return tls.VersionTLS12 // Default to TLS 1.2
 	}
-	return s.ListenAndServe()
+}
+
+// Run starts the server
+func (s *Server) Run() error {
+	s.log.Infof("Starting server on %s (TLS=%v)", s.httpServer.Addr, s.cfg.Server.EnableTLS)
+	defer s.accessFile.Close()
+	if s.cfg.Server.EnableTLS {
+		return s.httpServer.ListenAndServeTLS(s.cfg.Server.TLS.CertFile, s.cfg.Server.TLS.KeyFile) // Aggiornato
+	}
+	return s.httpServer.ListenAndServe()
+}
+
+// Shutdown gracefully shuts down the server
+func (s *Server) Shutdown(ctx context.Context) error {
+	if err := s.httpServer.Shutdown(ctx); err != nil {
+		s.log.Errorf("Server shutdown failed: %v", err)
+		return err
+	}
+	if err := s.etcdClient.Close(); err != nil {
+		s.log.Errorf("Failed to close etcd client: %v", err)
+	}
+	if err := s.handler.Close(); err != nil {
+		s.log.Errorf("Failed to close handlers: %v", err)
+	}
+	s.accessFile.Close()
+	s.log.Info("Server shut down gracefully")
+	return nil
 }
