@@ -12,14 +12,14 @@ import (
 // AuthMiddleware enforces JWT authentication for protected routes
 type AuthMiddleware struct {
 	jwtMgr     *auth.JWTManager
-	log        *logger.Logger
+	log        *logger.LogManager
 	cookieName string
 }
 
 // AuthConfig holds configuration for AuthMiddleware
 type AuthConfig struct {
 	JWTMgr     *auth.JWTManager
-	Logger     *logger.Logger
+	Logger     *logger.LogManager
 	CookieName string
 }
 

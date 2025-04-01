@@ -7,22 +7,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sync"
 
 	"opsmanager/pkg/logger"
 )
 
 // AESManager manages AES-GCM encryption and decryption
 type AESManager struct {
-	key       []byte
-	block     cipher.Block
-	gcm       cipher.AEAD
-	log       *logger.Logger
-	noncePool *sync.Pool
+	key   []byte
+	block cipher.Block
+	gcm   cipher.AEAD
+	log   *logger.LogManager
 }
 
 // NewAESManager initializes a new AESManager with a key
-func NewAESManager(key []byte, log *logger.Logger) (*AESManager, error) {
+func NewAESManager(key []byte, log *logger.LogManager) (*AESManager, error) {
 	// Validate key length (AES-128, AES-192, or AES-256)
 	if len(key) != 16 && len(key) != 24 && len(key) != 32 {
 		return nil, fmt.Errorf("invalid AES key length: got %d, expected 16, 24, or 32", len(key))
@@ -43,16 +41,13 @@ func NewAESManager(key []byte, log *logger.Logger) (*AESManager, error) {
 		block: block,
 		gcm:   gcm,
 		log:   log,
-		noncePool: &sync.Pool{
-			New: func() interface{} { return make([]byte, gcm.NonceSize()) },
-		},
 	}, nil
 }
 
 // EncryptAES encrypts data using AES-GCM
 func (m *AESManager) EncryptAES(plaintext []byte) ([]byte, error) {
-	nonce := m.noncePool.Get().([]byte)
-	defer m.noncePool.Put(nonce)
+	nonceSize := m.gcm.NonceSize()
+	nonce := make([]byte, nonceSize)
 
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		if m.log != nil {

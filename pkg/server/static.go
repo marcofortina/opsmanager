@@ -13,14 +13,14 @@ import (
 type StaticHandler struct {
 	dir        string
 	extensions map[string]struct{}
-	log        *logger.Logger
+	log        *logger.LogManager
 }
 
 // StaticConfig holds configuration for StaticHandler
 type StaticConfig struct {
-	Dir        string         // Directory for static files
-	Extensions []string       // Allowed file extensions
-	Logger     *logger.Logger // Optional logger
+	Dir        string             // Directory for static files
+	Extensions []string           // Allowed file extensions
+	Logger     *logger.LogManager // Optional logger
 }
 
 // Default allowed extensions

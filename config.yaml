@@ -29,6 +29,5 @@ two_factor:
 
 # Logging configuration
 logging:
-  debug_mode: true                # Enable debug logging (default: true)
   access_file: "logs/access.log"  # Access log file path (default: logs/access.log)
   level: "debug"                  # Log level (options: debug, info, warn, error)

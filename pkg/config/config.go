@@ -39,7 +39,7 @@ type TLSConfig struct {
 type EtcdConfig struct {
 	Endpoints []string  `mapstructure:"endpoints"`
 	EnableTLS bool      `mapstructure:"enable_tls"`
-	TLS       TLSConfig `mapstructure:"tls"` // Aggiornato con sottostruttura TLS
+	TLS       TLSConfig `mapstructure:"tls"`
 }
 
 // EncryptionConfig holds encryption settings
@@ -55,7 +55,6 @@ type TwoFactorConfig struct {
 
 // LoggingConfig holds logging settings
 type LoggingConfig struct {
-	DebugMode  bool   `mapstructure:"debug_mode"`
 	AccessFile string `mapstructure:"access_file"`
 	Level      string `mapstructure:"level"`
 }
@@ -71,9 +70,8 @@ var defaults = map[string]interface{}{
 	"server.tls.min_version": "TLSv1.3",
 	"etcd.endpoints":         []string{"localhost:2379"},
 	"etcd.enable_tls":        true,
-	"etcd.tls.cert_file":     "certs/client-cert.pem", // Aggiornato
-	"etcd.tls.key_file":      "certs/client-key.pem",  // Aggiornato
-	"logging.debug_mode":     true,
+	"etcd.tls.cert_file":     "certs/client-cert.pem",
+	"etcd.tls.key_file":      "certs/client-key.pem",
 	"logging.access_file":    "logs/access.log",
 	"logging.level":          "info",
 	"two_factor.enabled":     true,
@@ -95,7 +93,7 @@ var ValidLogLevels = map[string]struct{}{
 }
 
 // Load loads configuration from a YAML file and environment variables
-func Load(path string, log *logger.Logger) (*Config, error) {
+func Load(path string, log *logger.LogManager) (*Config, error) {
 	v := viper.New()
 	v.SetConfigFile(path)
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))

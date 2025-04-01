@@ -18,7 +18,7 @@ import (
 type KeyManager struct {
 	privateKey *rsa.PrivateKey
 	encrypted  []byte
-	log        *logger.Logger
+	log        *logger.LogManager
 	etcd       *etcd.Client
 	aesMgr     *crypto.AESManager
 	keyPath    string
@@ -31,7 +31,7 @@ type KeyManagerConfig struct {
 	KeyPath    string
 	AESKey     []byte
 	EtcdClient *etcd.Client
-	Logger     *logger.Logger
+	Logger     *logger.LogManager
 }
 
 // Default RSA constants

@@ -1,6 +1,8 @@
 package server
 
 import (
+	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -14,7 +16,7 @@ import (
 
 // AccessLogger logs HTTP requests with user and timing info
 type AccessLogger struct {
-	log        *logger.Logger
+	log        *logger.LogManager
 	jwtMgr     *auth.JWTManager
 	cookieName string
 	useJSON    bool
@@ -22,10 +24,10 @@ type AccessLogger struct {
 
 // AccessConfig holds configuration for AccessLogger
 type AccessConfig struct {
-	Logger     *logger.Logger
+	Logger     *logger.LogManager
 	JWTMgr     *auth.JWTManager
 	CookieName string
-	UseJSON    bool // If true, logs in JSON format
+	UseJSON    bool // If true, logs in JSON format; if false, logs in Apache Combined Log Format
 }
 
 // NewAccessLogger creates a new AccessLogger instance
@@ -36,6 +38,8 @@ func NewAccessLogger(cfg AccessConfig) *AccessLogger {
 	if cfg.Logger == nil {
 		cfg.Logger = logger.Default()
 	}
+	// Set PlainTextFormatter for access logging to avoid prefixes
+	cfg.Logger.SetFormatter(&PlainTextFormatter{})
 	return &AccessLogger{
 		log:        cfg.Logger,
 		jwtMgr:     cfg.JWTMgr,
@@ -56,7 +60,7 @@ func (al *AccessLogger) Middleware(next http.Handler) http.Handler {
 		if al.useJSON {
 			al.logJSON(r, lrw.statusCode, username, start)
 		} else {
-			al.logCommon(r, lrw.statusCode, username, start)
+			al.logCombined(r, lrw, username, start)
 		}
 	})
 }
@@ -83,26 +87,38 @@ func (al *AccessLogger) getUsername(r *http.Request) string {
 			return username
 		}
 	}
-
 	return "-"
 }
 
-// logCommon logs in Common Log Format
-func (al *AccessLogger) logCommon(r *http.Request, statusCode int, username string, start time.Time) {
+// logCombined logs in Apache Combined Log Format
+func (al *AccessLogger) logCombined(r *http.Request, lrw *loggingResponseWriter, username string, start time.Time) {
+	// Strip port from RemoteAddr
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr // Fallback if no port
+	}
+
 	var b strings.Builder
-	b.WriteString(r.RemoteAddr)
-	b.WriteString(" - ")
-	b.WriteString(username)
+	b.WriteString(host)     // %h: Remote IP address (no port)
+	b.WriteString(" - ")    // %l: Remote logname (always "-")
+	b.WriteString(username) // %u: Username
 	b.WriteString(" [")
-	b.WriteString(time.Now().Format("02/Jan/2006:15:04:05 -0700"))
+	b.WriteString(start.Format("02/Jan/2006:15:04:05 -0700")) // %t: Timestamp
 	b.WriteString(`] "`)
-	b.WriteString(r.Method)
+	b.WriteString(r.Method) // %r: Method
 	b.WriteString(" ")
-	b.WriteString(r.URL.String())
+	b.WriteString(r.URL.String()) // %r: URL
+	b.WriteString(" ")
+	b.WriteString(r.Proto) // %r: Protocol
 	b.WriteString(`" `)
-	b.WriteString(http.StatusText(statusCode))
+	b.WriteString(fmt.Sprintf("%d", lrw.statusCode)) // %>s: Status code
 	b.WriteString(" ")
-	b.WriteString(time.Since(start).String())
+	b.WriteString(fmt.Sprintf("%d", lrw.size)) // %O: Response size
+	b.WriteString(` "`)
+	b.WriteString(r.Header.Get("Referer")) // %{Referer}i: Referer header
+	b.WriteString(`" "`)
+	b.WriteString(r.Header.Get("User-Agent")) // %{User-Agent}i: User-Agent header
+	b.WriteString(`"`)
 	al.log.Info(b.String())
 }
 
@@ -120,14 +136,30 @@ func (al *AccessLogger) logJSON(r *http.Request, statusCode int, username string
 	}).Info("HTTP request")
 }
 
-// loggingResponseWriter captures the HTTP status code
+// loggingResponseWriter captures the HTTP status code and response size
 type loggingResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
+	size       int64
 }
 
 // WriteHeader records the status code
 func (lrw *loggingResponseWriter) WriteHeader(code int) {
 	lrw.statusCode = code
 	lrw.ResponseWriter.WriteHeader(code)
+}
+
+// Write records the size of the response body
+func (lrw *loggingResponseWriter) Write(b []byte) (int, error) {
+	n, err := lrw.ResponseWriter.Write(b)
+	lrw.size += int64(n)
+	return n, err
+}
+
+// PlainTextFormatter is a custom formatter for plain text output
+type PlainTextFormatter struct{}
+
+// Format renders the log entry as plain text without metadata
+func (f *PlainTextFormatter) Format(entry *logrus.Entry) ([]byte, error) {
+	return []byte(entry.Message + "\n"), nil
 }

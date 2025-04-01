@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"net/http"
 	"os/signal"
@@ -11,6 +12,8 @@ import (
 	"opsmanager/pkg/config"
 	"opsmanager/pkg/logger"
 	"opsmanager/pkg/server"
+
+	"github.com/sirupsen/logrus"
 )
 
 // main initializes and starts the Ops Manager application
@@ -27,20 +30,22 @@ func main() {
 
 // run executes the main application logic
 func run(configPath string, shutdownTimeout time.Duration) error {
-	// Load configuration
-	log := logger.New(true) // Default debug mode until config is loaded
+	// Initialize logger with a default level until config is loaded
+	log := logger.NewLogManager("info", &logrus.JSONFormatter{})
 	log.Infof("Loading configuration from %s", configPath)
+
+	// Load configuration
 	cfg, err := config.Load(configPath, log)
 	if err != nil {
 		return err
 	}
 
-	// Debug: Stampa il valore di AccessFile
-	log.Infof("Loaded config - AccessFile: %s", cfg.Logging.AccessFile)
+	// Debug: Print the value of AccessFile and Level
+	log.Infof("Loaded config - AccessFile: %s, Log Level: %s", cfg.Logging.AccessFile, cfg.Logging.Level)
 
-	// Update logger with config settings
-	log = logger.New(cfg.Logging.DebugMode)
-	log.Infof("Starting server with debug mode: %v", cfg.Logging.DebugMode)
+	// Update logger with configured level
+	log = logger.NewLogManager(cfg.Logging.Level, &logrus.JSONFormatter{})
+	log.Infof("Starting server with log level: %s", cfg.Logging.Level)
 
 	// Initialize server
 	srvCfg := server.ServerConfig{
@@ -48,7 +53,7 @@ func run(configPath string, shutdownTimeout time.Duration) error {
 		Logger:      log,
 		TemplateDir: "./templates",
 	}
-	srv := server.New(srvCfg)
+	srv := server.NewServer(srvCfg)
 
 	// Start server in a goroutine
 	errChan := make(chan error, 1)
@@ -75,7 +80,7 @@ func run(configPath string, shutdownTimeout time.Duration) error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Errorf("Server shutdown failed: %v", err)
 		return err
 	}

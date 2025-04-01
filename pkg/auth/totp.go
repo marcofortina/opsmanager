@@ -6,7 +6,6 @@ import (
 	"encoding/base32"
 	"fmt"
 	"math"
-	"sync"
 	"time"
 
 	"opsmanager/pkg/logger"
@@ -17,8 +16,7 @@ type TOTPManager struct {
 	secret     []byte
 	interval   int
 	codeLength int
-	log        *logger.Logger
-	pool       *sync.Pool
+	log        *logger.LogManager
 }
 
 // TOTPConfig holds configuration for TOTPManager
@@ -26,7 +24,7 @@ type TOTPConfig struct {
 	Seed       string
 	Interval   int // Time step in seconds
 	CodeLength int // Length of the TOTP code
-	Logger     *logger.Logger
+	Logger     *logger.LogManager
 }
 
 // Default TOTP constants
@@ -65,21 +63,13 @@ func NewTOTPManager(cfg *TOTPConfig) (*TOTPManager, error) {
 		interval:   cfg.Interval,
 		codeLength: cfg.CodeLength,
 		log:        cfg.Logger,
-		pool: &sync.Pool{
-			New: func() interface{} {
-				b := make([]byte, 8)
-				return &b // Returns *[]byte
-			},
-		},
 	}, nil
 }
 
 // GenerateTOTP generates a TOTP code for a given time
 func (m *TOTPManager) GenerateTOTP(t *time.Time) (string, error) {
 	counter := uint64(math.Floor(float64(t.Unix()) / float64(m.interval)))
-	msgPtr := m.pool.Get().(*[]byte) // Correct: expects *[]byte
-	defer m.pool.Put(msgPtr)
-	msg := *msgPtr // Dereference to get []byte
+	msg := make([]byte, 8)
 
 	for i := 7; i >= 0; i-- {
 		msg[i] = byte(counter & 0xff)

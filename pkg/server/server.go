@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"net/http"
 	"os"
 	"time"
@@ -15,14 +16,16 @@ import (
 	"opsmanager/pkg/logger"
 	"opsmanager/pkg/middleware"
 	"opsmanager/pkg/rsa"
+
+	"github.com/sirupsen/logrus"
 )
 
 // Server represents the web server
 type Server struct {
 	httpServer    *http.Server
 	cfg           *config.Config
-	log           *logger.Logger
-	accessLog     *logger.Logger
+	log           *logger.LogManager
+	accessLog     *logger.LogManager
 	accessFile    *os.File
 	handler       *handlers.Handler
 	etcdClient    *etcd.Client
@@ -32,12 +35,12 @@ type Server struct {
 // ServerConfig holds configuration for Server
 type ServerConfig struct {
 	Config      *config.Config
-	Logger      *logger.Logger
+	Logger      *logger.LogManager
 	TemplateDir string
 }
 
-// New initializes a new Server instance
-func New(cfg ServerConfig) *Server {
+// NewServer initializes a new Server instance
+func NewServer(cfg ServerConfig) *Server {
 	if cfg.Logger == nil {
 		cfg.Logger = logger.Default()
 	}
@@ -47,7 +50,7 @@ func New(cfg ServerConfig) *Server {
 	if err != nil {
 		cfg.Logger.Fatalf("Failed to open access log at %s: %v", cfg.Config.Logging.AccessFile, err)
 	}
-	accessLog := logger.New(cfg.Config.Logging.DebugMode)
+	accessLog := logger.NewLogManager(cfg.Config.Logging.Level, &logrus.TextFormatter{})
 	accessLog.SetOutput(accessFile)
 
 	// Initialize etcd client
@@ -122,13 +125,13 @@ func New(cfg ServerConfig) *Server {
 		JWTMgr:      jwtMgr,
 		CSRFMgr:     csrfMgr,
 		LoginMgr:    loginMgr,
-		TotpMgr:     totpMgr, // Aggiunto
+		TotpMgr:     totpMgr,
 		Etcd:        etcdClient,
 		Logger:      cfg.Logger,
 		Config:      cfg.Config,
 		OpTimeout:   2 * time.Second,
 	}
-	h, err := handlers.New(handlerCfg)
+	h, err := handlers.NewHandler(handlerCfg)
 	if err != nil {
 		cfg.Logger.Fatalf("Failed to initialize handlers: %v", err)
 	}
@@ -147,7 +150,7 @@ func New(cfg ServerConfig) *Server {
 	authMw := middleware.NewAuth(middleware.AuthConfig{JWTMgr: jwtMgr, Logger: cfg.Logger})
 	mux.Handle("/dashboard", authMw.Middleware(http.HandlerFunc(h.Dashboard)))
 	mux.Handle("/config", authMw.Middleware(http.HandlerFunc(h.Config)))
-	staticHandler.AddStaticHandlers(mux) // Aggiornato
+	staticHandler.AddStaticHandlers(mux)
 
 	// Apply middleware
 	accessCfg := AccessConfig{
@@ -173,7 +176,7 @@ func New(cfg ServerConfig) *Server {
 		accessFile:    accessFile,
 		handler:       h,
 		etcdClient:    etcdClient,
-		staticHandler: staticHandler, // Aggiunto
+		staticHandler: staticHandler,
 	}
 
 	if cfg.Config.Server.EnableTLS {
@@ -186,10 +189,10 @@ func New(cfg ServerConfig) *Server {
 // configureTLS sets up TLS configuration
 func (s *Server) configureTLS() {
 	tlsConfig := &tls.Config{
-		MinVersion: tlsVersionFromString(s.cfg.Server.TLS.MinVersion), // Aggiornato
+		MinVersion: tlsVersionFromString(s.cfg.Server.TLS.MinVersion),
 	}
 
-	if s.cfg.Server.TLS.CAFile != "" { // Aggiornato
+	if s.cfg.Server.TLS.CAFile != "" {
 		caCert, err := os.ReadFile(s.cfg.Server.TLS.CAFile)
 		if err != nil {
 			s.log.Fatalf("Failed to read CA file %s: %v", s.cfg.Server.TLS.CAFile, err)
@@ -222,26 +225,52 @@ func tlsVersionFromString(version string) uint16 {
 // Run starts the server
 func (s *Server) Run() error {
 	s.log.Infof("Starting server on %s (TLS=%v)", s.httpServer.Addr, s.cfg.Server.EnableTLS)
-	defer s.accessFile.Close()
 	if s.cfg.Server.EnableTLS {
-		return s.httpServer.ListenAndServeTLS(s.cfg.Server.TLS.CertFile, s.cfg.Server.TLS.KeyFile) // Aggiornato
+		return s.httpServer.ListenAndServeTLS(s.cfg.Server.TLS.CertFile, s.cfg.Server.TLS.KeyFile)
 	}
 	return s.httpServer.ListenAndServe()
 }
 
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown(ctx context.Context) error {
-	if err := s.httpServer.Shutdown(ctx); err != nil {
+	var shutdownErr error
+
+	// Shutdown HTTP server
+	if err := s.httpServer.Shutdown(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		s.log.Errorf("Server shutdown failed: %v", err)
-		return err
+		shutdownErr = err
 	}
-	if err := s.etcdClient.Close(); err != nil {
-		s.log.Errorf("Failed to close etcd client: %v", err)
+
+	// Close etcd client
+	if s.etcdClient != nil {
+		if err := s.etcdClient.Close(); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Errorf("Failed to close etcd client: %v", err)
+			if shutdownErr == nil {
+				shutdownErr = err
+			}
+		}
 	}
-	if err := s.handler.Close(); err != nil {
-		s.log.Errorf("Failed to close handlers: %v", err)
+
+	// Close handler
+	if s.handler != nil {
+		if err := s.handler.Close(); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Errorf("Failed to close handlers: %v", err)
+			if shutdownErr == nil {
+				shutdownErr = err
+			}
+		}
 	}
-	s.accessFile.Close()
+
+	// Close access log file
+	if s.accessFile != nil {
+		if err := s.accessFile.Close(); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Errorf("Failed to close access log file: %v", err)
+			if shutdownErr == nil {
+				shutdownErr = err
+			}
+		}
+	}
+
 	s.log.Info("Server shut down gracefully")
-	return nil
+	return shutdownErr
 }

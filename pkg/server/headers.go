@@ -11,14 +11,14 @@ type SecurityHeaders struct {
 	headers map[string]string
 	csp     string
 	hsts    string
-	log     *logger.Logger
+	log     *logger.LogManager
 }
 
 // SecurityConfig holds configuration for security headers
 type SecurityConfig struct {
-	CSP    string         // Content-Security-Policy (optional override)
-	HSTS   string         // Strict-Transport-Security (optional override)
-	Logger *logger.Logger // Optional logger
+	CSP    string             // Content-Security-Policy (optional override)
+	HSTS   string             // Strict-Transport-Security (optional override)
+	Logger *logger.LogManager // Optional log manager
 }
 
 // Default security header values

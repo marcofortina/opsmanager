@@ -3,7 +3,6 @@ package auth
 import (
 	"crypto/rand"
 	"encoding/base64"
-	"sync"
 
 	"opsmanager/pkg/logger"
 )
@@ -11,15 +10,14 @@ import (
 // CSRFManager manages CSRF token generation
 type CSRFManager struct {
 	tokenLength int
-	log         *logger.Logger
-	bufferPool  *sync.Pool
+	log         *logger.LogManager
 }
 
 // CSRFTokenLength is the default length for CSRF tokens
 const CSRFTokenLength = 32
 
 // NewCSRFManager initializes a new CSRFManager
-func NewCSRFManager(tokenLength int, log *logger.Logger) *CSRFManager {
+func NewCSRFManager(tokenLength int, log *logger.LogManager) *CSRFManager {
 	if tokenLength <= 0 {
 		tokenLength = CSRFTokenLength
 	}
@@ -29,20 +27,12 @@ func NewCSRFManager(tokenLength int, log *logger.Logger) *CSRFManager {
 	return &CSRFManager{
 		tokenLength: tokenLength,
 		log:         log,
-		bufferPool: &sync.Pool{
-			New: func() interface{} {
-				b := make([]byte, tokenLength)
-				return &b // Restituisce *[]byte
-			},
-		},
 	}
 }
 
 // GenerateToken generates a secure random CSRF token
 func (m *CSRFManager) GenerateToken() (string, error) {
-	bPtr := m.bufferPool.Get().(*[]byte) // Corretto: attende *[]byte
-	defer m.bufferPool.Put(bPtr)
-	b := *bPtr // Dereferenzia per usare il []byte
+	b := make([]byte, m.tokenLength)
 
 	_, err := rand.Read(b)
 	if err != nil {

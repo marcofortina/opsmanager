@@ -8,13 +8,13 @@ import (
 
 // LoginManager manages user authentication
 type LoginManager struct {
-	log       *logger.Logger
+	log       *logger.LogManager
 	validUser string
 	validPass string
 }
 
 // NewLoginManager initializes a new LoginManager with credentials
-func NewLoginManager(log *logger.Logger, username, password string) (*LoginManager, error) {
+func NewLoginManager(log *logger.LogManager, username, password string) (*LoginManager, error) {
 	if username == "" || password == "" {
 		return nil, errors.New("username and password cannot be empty")
 	}

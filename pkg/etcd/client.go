@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -16,7 +17,7 @@ import (
 // Client wraps an etcd client
 type Client struct {
 	client *clientv3.Client
-	log    *logger.Logger
+	log    *logger.LogManager
 }
 
 // EtcdConfig holds etcd client configuration
@@ -27,7 +28,7 @@ type EtcdConfig struct {
 	TLSKeyFile  string
 	TLSCAFile   string
 	DialTimeout time.Duration
-	Logger      *logger.Logger
+	Logger      *logger.LogManager
 }
 
 // Session TTL constants
@@ -174,8 +175,10 @@ func (c *Client) DeleteSession(ctx context.Context, key string) error {
 // Close shuts down the etcd client
 func (c *Client) Close() error {
 	err := c.client.Close()
-	if err != nil {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		c.log.Errorf("Failed to close etcd client: %v", err)
+		return err
 	}
-	return err
+	c.log.Debugf("Etcd client closed successfully")
+	return nil
 }

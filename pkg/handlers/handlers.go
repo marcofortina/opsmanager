@@ -23,7 +23,7 @@ type Handler struct {
 	loginMgr  *auth.LoginManager
 	totpMgr   *auth.TOTPManager
 	etcd      *etcd.Client
-	log       *logger.Logger
+	log       *logger.LogManager
 	cfg       *config.Config
 	opTimeout time.Duration
 }
@@ -36,13 +36,13 @@ type HandlerConfig struct {
 	LoginMgr    *auth.LoginManager
 	TotpMgr     *auth.TOTPManager
 	Etcd        *etcd.Client
-	Logger      *logger.Logger
+	Logger      *logger.LogManager
 	Config      *config.Config
 	OpTimeout   time.Duration
 }
 
-// New initializes a new Handler instance
-func New(cfg HandlerConfig) (*Handler, error) {
+// NewHandler initializes a new Handler instance
+func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if cfg.OpTimeout == 0 {
 		cfg.OpTimeout = 2 * time.Second
 	}
@@ -78,7 +78,7 @@ func New(cfg HandlerConfig) (*Handler, error) {
 		jwtMgr:    cfg.JWTMgr,
 		csrfMgr:   cfg.CSRFMgr,
 		loginMgr:  cfg.LoginMgr,
-		totpMgr:   cfg.TotpMgr, // Aggiunto
+		totpMgr:   cfg.TotpMgr,
 		etcd:      cfg.Etcd,
 		log:       cfg.Logger,
 		cfg:       cfg.Config,
@@ -278,7 +278,7 @@ func (h *Handler) Verify2FA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.totpMgr.VerifyTOTP(totpCode, time.Now()) { // Aggiornato
+	if !h.totpMgr.VerifyTOTP(totpCode, time.Now()) {
 		h.log.Warnf("Invalid TOTP code for %s", username)
 		h.sendJSONError(w, "Invalid 2FA code", http.StatusUnauthorized)
 		return
@@ -379,5 +379,6 @@ func (h *Handler) sendJSONError(w http.ResponseWriter, message string, code int)
 
 // Close releases resources
 func (h *Handler) Close() error {
-	return h.etcd.Close()
+	//TODO
+	return nil
 }

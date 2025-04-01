@@ -16,14 +16,14 @@ type JWTManager struct {
 	privateKey *rsa.PrivateKey
 	publicKey  *rsa.PublicKey
 	issuer     string
-	log        *logger.Logger
+	log        *logger.LogManager
 }
 
 // JWTConfig holds configuration for JWTManager
 type JWTConfig struct {
 	PrivateKey *rsa.PrivateKey
 	Issuer     string
-	Logger     *logger.Logger
+	Logger     *logger.LogManager
 }
 
 // Claim keys used in JWT tokens
