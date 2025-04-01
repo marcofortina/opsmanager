@@ -27,6 +27,14 @@
             padding: 10px 20px;
             border-radius: 5px;
         }
+        /* QRcode */
+        #qrcode {
+            margin: 20px auto;
+            text-align: center;
+        }
+        #qr-instruction {
+            display: none;
+        }
     </style>
 </head>
 <body class="d-flex justify-content-center align-items-center vh-100">
@@ -60,6 +68,8 @@
                 <div class="col-md-4">
                     <div class="card p-4 shadow-lg">
                         <h3 class="mb-4">Verify 2FA Code</h3>
+                        <p id="qr-instruction">Scan this QR code with Google Authenticator:</p>
+                        <div id="qrcode"></div>
                         <form id="auth-2fa-form">
                             <input type="hidden" name="csrf_token_2fa" id="csrf_token_2fa">
                             <div class="mb-3">
@@ -80,6 +90,7 @@
 
     <script src="/static/js/jquery-3.7.1.min.js"></script>
     <script src="/static/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/qrcode.min.js"></script>
     <script>
         // Ensure jQuery is available globally
         window.jQuery = window.$;
@@ -152,6 +163,19 @@
                             $("#login-form").addClass("d-none");
                             $("#2fa-form").removeClass("d-none");
                             $("#otp").focus();
+                            if (response.qrCodeURL) {
+                                // Decode any escaped characters in the URL
+                                const qrCodeURL = decodeURIComponent(response.qrCodeURL.replace(/\\u0026/g, '&'));
+                                console.log("QR Code URL:", qrCodeURL); // Debug
+                                $("#qr-instruction").show();
+                                new QRCode(document.getElementById("qrcode"), {
+                                    text: qrCodeURL,
+                                    width: 128,
+                                    height: 128
+                                });
+                            } else {
+                                $("#qr-instruction").hide();
+                            }
                         } else if (response.redirect) {
                             window.location.href = response.redirect;
                         } else if (response.error) {
@@ -207,6 +231,8 @@
                 $("#auth-2fa-form")[0].reset();
                 $("#login-form").removeClass("d-none");
                 $("#2fa-form").addClass("d-none");
+                $("#qrcode").empty();
+                $("#qr-instruction").hide();
                 $("#username").focus();
             });
         });

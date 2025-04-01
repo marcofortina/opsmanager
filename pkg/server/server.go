@@ -16,6 +16,7 @@ import (
 	"opsmanager/pkg/logger"
 	"opsmanager/pkg/middleware"
 	"opsmanager/pkg/rsa"
+	"opsmanager/pkg/users"
 
 	"github.com/sirupsen/logrus"
 )
@@ -50,7 +51,7 @@ func NewServer(cfg ServerConfig) *Server {
 	if err != nil {
 		cfg.Logger.Fatalf("Failed to open access log at %s: %v", cfg.Config.Logging.AccessFile, err)
 	}
-	accessLog := logger.NewLogManager(cfg.Config.Logging.Level, &logrus.TextFormatter{})
+	accessLog := logger.NewLogManager(cfg.Config.Logging.Level, &logrus.JSONFormatter{})
 	accessLog.SetOutput(accessFile)
 
 	// Initialize etcd client
@@ -98,20 +99,20 @@ func NewServer(cfg ServerConfig) *Server {
 	cfg.Logger.Infof("Initializing CSRF manager")
 	csrfMgr := auth.NewCSRFManager(auth.CSRFTokenLength, cfg.Logger)
 
-	// Initialize login manager
-	cfg.Logger.Infof("Initializing login manager")
-	loginMgr, err := auth.NewLoginManager(cfg.Logger, "admin", "secret123") // Hardcoded temporaneo
+	// Initialize user manager
+	cfg.Logger.Infof("Initializing user manager")
+	userMgr, err := users.NewUserManager(cfg.Logger, etcdClient)
 	if err != nil {
-		cfg.Logger.Fatalf("Failed to initialize login manager: %v", err)
+		cfg.Logger.Fatalf("Failed to initialize user manager: %v", err)
 	}
 
 	// Initialize TOTP manager
 	cfg.Logger.Infof("Initializing TOTP manager")
 	totpCfg := &auth.TOTPConfig{
-		Seed:       cfg.Config.TwoFactor.Secret,
 		Interval:   auth.DefaultTOTPInterval,
 		CodeLength: auth.DefaultTOTPCodeLength,
 		Logger:     cfg.Logger,
+		Etcd:       etcdClient,
 	}
 	totpMgr, err := auth.NewTOTPManager(totpCfg)
 	if err != nil {
@@ -124,7 +125,7 @@ func NewServer(cfg ServerConfig) *Server {
 		TemplateDir: cfg.TemplateDir,
 		JWTMgr:      jwtMgr,
 		CSRFMgr:     csrfMgr,
-		LoginMgr:    loginMgr,
+		UserMgr:     userMgr,
 		TotpMgr:     totpMgr,
 		Etcd:        etcdClient,
 		Logger:      cfg.Logger,

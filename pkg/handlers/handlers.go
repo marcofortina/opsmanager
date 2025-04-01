@@ -13,6 +13,7 @@ import (
 	"opsmanager/pkg/config"
 	"opsmanager/pkg/etcd"
 	"opsmanager/pkg/logger"
+	"opsmanager/pkg/users"
 )
 
 // Handler manages HTTP request handlers
@@ -20,7 +21,7 @@ type Handler struct {
 	templates map[string]*template.Template
 	jwtMgr    *auth.JWTManager
 	csrfMgr   *auth.CSRFManager
-	loginMgr  *auth.LoginManager
+	userMgr   *users.UserManager
 	totpMgr   *auth.TOTPManager
 	etcd      *etcd.Client
 	log       *logger.LogManager
@@ -33,7 +34,7 @@ type HandlerConfig struct {
 	TemplateDir string
 	JWTMgr      *auth.JWTManager
 	CSRFMgr     *auth.CSRFManager
-	LoginMgr    *auth.LoginManager
+	UserMgr     *users.UserManager
 	TotpMgr     *auth.TOTPManager
 	Etcd        *etcd.Client
 	Logger      *logger.LogManager
@@ -49,12 +50,15 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = logger.Default()
 	}
+	if cfg.UserMgr == nil {
+		return nil, fmt.Errorf("user manager is required")
+	}
 	if cfg.TotpMgr == nil {
 		totpCfg := &auth.TOTPConfig{
-			Seed:       cfg.Config.TwoFactor.Secret,
 			Interval:   auth.DefaultTOTPInterval,
 			CodeLength: auth.DefaultTOTPCodeLength,
 			Logger:     cfg.Logger,
+			Etcd:       cfg.Etcd,
 		}
 		var err error
 		cfg.TotpMgr, err = auth.NewTOTPManager(totpCfg)
@@ -77,7 +81,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		templates: tmpls,
 		jwtMgr:    cfg.JWTMgr,
 		csrfMgr:   cfg.CSRFMgr,
-		loginMgr:  cfg.LoginMgr,
+		userMgr:   cfg.UserMgr,
 		totpMgr:   cfg.TotpMgr,
 		etcd:      cfg.Etcd,
 		log:       cfg.Logger,
@@ -98,7 +102,6 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 // handleLoginGet renders the login page
 func (h *Handler) handleLoginGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
 	if cookie, err := r.Cookie("jwt_token"); err == nil {
 		if _, err := h.jwtMgr.VerifyToken(cookie.Value); err == nil {
 			http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
@@ -127,7 +130,6 @@ func (h *Handler) handleLoginGet(w http.ResponseWriter, r *http.Request) {
 // handleLoginPost processes login form submission
 func (h *Handler) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-
 	if err := r.ParseForm(); err != nil {
 		h.sendJSONError(w, "Invalid form data", http.StatusBadRequest)
 		return
@@ -150,7 +152,7 @@ func (h *Handler) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.loginMgr.VerifyCredentials(username, password) {
+	if !h.userMgr.VerifyCredentials(username, password) {
 		h.sendJSONError(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -185,7 +187,7 @@ func (h *Handler) completeLogin(w http.ResponseWriter, username string) {
 	}
 
 	h.setJWTCookie(w, token)
-	h.log.Infof("User %s authenticated without 2FA", username)
+	h.log.Infof("User %s authenticated", username)
 	json.NewEncoder(w).Encode(map[string]interface{}{"redirect": "/dashboard"})
 }
 
@@ -206,6 +208,20 @@ func (h *Handler) initiate2FA(w http.ResponseWriter, ctx context.Context, userna
 		return
 	}
 
+	secret, err := h.totpMgr.GetOrCreateTOTPSecret(ctx, username)
+	if err != nil {
+		h.log.Errorf("Failed to get or create TOTP secret for %s: %v", username, err)
+		h.sendJSONError(w, "Failed to initialize TOTP", http.StatusInternalServerError)
+		return
+	}
+
+	isSetupCompleted, err := h.totpMgr.IsSetupCompleted(ctx, username)
+	if err != nil {
+		h.log.Errorf("Failed to check 2FA setup status for %s: %v", username, err)
+		h.sendJSONError(w, "Failed to check 2FA setup", http.StatusInternalServerError)
+		return
+	}
+
 	if err := h.etcd.StoreSession(ctx, "csrf_2fa:"+csrfToken2FA, csrfToken2FA, etcd.SessionTTL5Minutes); err != nil {
 		h.log.Errorf("Failed to store 2FA CSRF token: %v", err)
 		h.sendJSONError(w, "Internal server error", http.StatusInternalServerError)
@@ -217,18 +233,23 @@ func (h *Handler) initiate2FA(w http.ResponseWriter, ctx context.Context, userna
 		return
 	}
 
-	h.log.Infof("User %s awaiting 2FA", username)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	h.log.Infof("User %s awaiting 2FA verification", username)
+	response := map[string]interface{}{
 		"requires2FA":  true,
 		"tempToken":    tempToken,
 		"csrfToken2FA": csrfToken2FA,
-	})
+	}
+	if !isSetupCompleted {
+		qrCodeURL := h.totpMgr.GetQRCodeURL(username, secret)
+		h.log.Debugf("Generated QR code URL for %s: %s", username, qrCodeURL)
+		response["qrCodeURL"] = qrCodeURL
+	}
+	json.NewEncoder(w).Encode(response)
 }
 
 // Verify2FA processes 2FA verification
 func (h *Handler) Verify2FA(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-
 	if cookie, err := r.Cookie("jwt_token"); err == nil {
 		if _, err := h.jwtMgr.VerifyToken(cookie.Value); err == nil {
 			http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
@@ -278,9 +299,17 @@ func (h *Handler) Verify2FA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.log.Debugf("Verifying TOTP code for %s: %s", username, totpCode)
 	if !h.totpMgr.VerifyTOTP(totpCode, time.Now()) {
 		h.log.Warnf("Invalid TOTP code for %s", username)
 		h.sendJSONError(w, "Invalid 2FA code", http.StatusUnauthorized)
+		return
+	}
+
+	// Mark 2FA setup as completed
+	if err := h.totpMgr.MarkSetupCompleted(ctx, username); err != nil {
+		h.log.Errorf("Failed to mark 2FA setup as completed for %s: %v", username, err)
+		h.sendJSONError(w, "Failed to complete 2FA setup", http.StatusInternalServerError)
 		return
 	}
 
@@ -379,6 +408,5 @@ func (h *Handler) sendJSONError(w http.ResponseWriter, message string, code int)
 
 // Close releases resources
 func (h *Handler) Close() error {
-	//TODO
 	return nil
 }
